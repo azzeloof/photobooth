@@ -375,7 +375,7 @@ class GBCamera:
         # Apply colorization if requested
         if color:
             image = image.apply_processing(
-                lambda data: self.colorize(data) or data,
+                self.colorize,  # Simply pass the colorize method directly
                 "gameboy_colorize"
             )
 
@@ -453,11 +453,25 @@ class GBCamera:
 
         return (regular_path, bordered_path)
 
+    def stop_thread(self):
+        """Signals the capture thread to stop."""
+        logger.info("Stopping camera capture thread...")
+        self.running = False
+
+    def release(self):
+        """Releases the camera hardware resource. Call after thread is joined."""
+        logger.info("Releasing camera hardware...")
+        if self.cam and self.cam.isOpened():
+            self.cam.release()
+        self.cam = None
+        with self.frame_lock:
+            self.current_frame = None
 
     def stop(self):
         """
         Stop the camera and cleanup resources
         """
+        self.stop_thread()
         logger.info("Stopping camera...")
         self.running = False
 

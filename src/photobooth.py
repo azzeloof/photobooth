@@ -177,13 +177,17 @@ class CameraManager:
         logger.info("Shutting down cameras...")
 
         if self.gb_camera:
-            self.gb_camera.stop()
-
-        if self.nikon:
-            self.nikon.release()
+            self.gb_camera.stop_thread()
 
         if self.gb_thread and self.gb_thread.is_alive():
             self.gb_thread.join(timeout=2.0)
+            logger.info("GB camera thread joined.")
+
+        if self.gb_camera:
+            self.gb_camera.release()
+
+        if self.nikon:
+            self.nikon.release()
 
     @property
     def is_initialized(self) -> bool:
