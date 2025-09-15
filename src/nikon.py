@@ -1,5 +1,7 @@
 import gphoto2 as gp
 import os
+import signal
+import subprocess
 import time
 import logging
 from pathlib import Path
@@ -56,58 +58,94 @@ class NikonCamera:
         except Exception as e:
             raise NikonError(f"Could not create capture directory: {e}")
 
+    def _kill_conflicting_processes(self):
+        """
+        Finds and kills processes known to conflict with gphoto2 on Linux.
+        This uses `pgrep` to find processes by name.
+        """
+        conflicting_processes = ['gvfs-gphoto2-volume-monitor', 'gvfsd-gphoto2']
+        logger.info("Attempting to find and kill conflicting processes...")
+
+        try:
+            for process_name in conflicting_processes:
+                # Use pgrep to find the PID of the conflicting process
+                result = subprocess.run(['pgrep', '-f', process_name], capture_output=True, text=True)
+                if result.stdout:
+                    pids = result.stdout.strip().split('\n')
+                    for pid in pids:
+                        if pid:
+                            try:
+                                logger.warning(
+                                    f"Found conflicting process '{process_name}' with PID {pid}. Terminating it...")
+                                os.kill(int(pid), signal.SIGTERM)
+                                # Wait a moment for the process to be terminated
+                                time.sleep(0.5)
+                            except (ValueError, ProcessLookupError, PermissionError) as e:
+                                logger.error(f"Failed to kill process {pid}: {e}")
+        except FileNotFoundError:
+            logger.warning("'pgrep' command not found. Cannot automatically kill conflicting processes.")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while trying to kill processes: {e}")
+
     def _initialize_camera(self):
         """Initialize the camera with comprehensive error handling"""
-        try:
-            # Check if gPhoto2 can detect any cameras
-            camera_list = gp.check_result(gp.gp_camera_autodetect())
-            if not camera_list:
-                raise NikonError("No cameras detected by gPhoto2")
+        max_init_retries = 2  # Try once, kill process, then try again
+        for attempt in range(max_init_retries):
+            try:
+                # Check if gPhoto2 can detect any cameras
+                camera_list = gp.check_result(gp.gp_camera_autodetect())
+                if not camera_list:
+                    raise NikonError("No cameras detected by gPhoto2")
 
-            logger.info(f"Detected cameras: {[cam[0] for cam in camera_list]}")
+                logger.info(f"Detected cameras: {[cam[0] for cam in camera_list]}")
 
-            # Initialize camera
-            self.camera = gp.Camera()
+                # Initialize camera
+                self.camera = gp.Camera()
+                self.camera.init()
 
-            # Set timeout for camera operations
-            self.camera.set_config(self._create_timeout_config())
+                # Get camera information
+                self._get_camera_info()
 
-            # Initialize the camera connection
-            self.camera.init()
+                # Apply initial configuration
+                self._apply_camera_settings()
 
-            # Get camera information
-            self._get_camera_info()
+                self._is_initialized = True
+                logger.info(f"Camera initialized successfully: {self._camera_info.get('model', 'Unknown')}")
+                # If initialization is successful, break out of the retry loop
+                break
 
-            # Apply initial configuration
-            self._apply_camera_settings()
+            except gp.GPhoto2Error as error:
+                # If the camera is busy on the first attempt, try to kill the conflicting process
+                if error.code == gp.GP_ERROR_IO_USB_CLAIM and attempt < max_init_retries - 1:
+                    logger.warning("Camera is busy. Attempting to resolve conflict automatically...")
+                    self._kill_conflicting_processes()
+                    # Wait a second before retrying
+                    time.sleep(1)
+                    continue  # Continue to the next attempt in the loop
 
-            self._is_initialized = True
-            logger.info(f"Camera initialized successfully: {self._camera_info.get('model', 'Unknown')}")
+                self.camera = None
+                if error.code == gp.GP_ERROR_MODEL_NOT_FOUND:
+                    raise NikonError(
+                        "Camera not found. Please ensure your camera is connected, turned on, and in the correct mode (not in sleep mode)")
+                elif error.code == gp.GP_ERROR_IO_USB_CLAIM:
+                    raise NikonError("Camera is busy or already in use by another application")
+                elif error.code == gp.GP_ERROR_TIMEOUT:
+                    raise NikonError("Camera connection timed out. Check USB connection and camera power")
+                else:
+                    raise NikonError(f"Camera initialization failed: {error} (code: {error.code})")
+            except Exception as error:
+                self.camera = None
+                raise NikonError(f"Unexpected error during camera initialization: {error}")
 
-        except gp.GPhoto2Error as error:
-            self.camera = None
-            if error.code == gp.GP_ERROR_MODEL_NOT_FOUND:
-                raise NikonError(
-                    "Camera not found. Please ensure your camera is connected, turned on, and in the correct mode (not in sleep mode)")
-            elif error.code == gp.GP_ERROR_IO_USB_CLAIM:
-                raise NikonError("Camera is busy or already in use by another application")
-            elif error.code == gp.GP_ERROR_TIMEOUT:
-                raise NikonError("Camera connection timed out. Check USB connection and camera power")
-            else:
-                raise NikonError(f"Camera initialization failed: {error} (code: {error.code})")
-        except Exception as error:
-            self.camera = None
-            raise NikonError(f"Unexpected error during camera initialization: {error}")
-
-    def _create_timeout_config(self) -> gp.CameraWidget:
-        """Create timeout configuration for camera operations"""
-        try:
-            config = self.camera.get_config()
-            # Set timeout if available (implementation depends on the camera model)
-            return config
-        except:
-            # Return empty config if the timeout setting fails
-            return gp.CameraWidget()
+    #def _create_timeout_config(self) -> gp.CameraWidget:
+    #    """Create timeout configuration for camera operations"""
+    #    try:
+    #        config = self.camera.get_config()
+    #        # Set timeout if available (implementation depends on the camera model)
+    #        return config
+    #    except:
+    #        # Return empty config if the timeout setting fails
+    #        return gp.CameraWidget()
 
     def _get_camera_info(self):
         """Retrieve camera information and capabilities"""
