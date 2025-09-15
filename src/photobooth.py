@@ -1,63 +1,105 @@
 import threading
-import time
 from gbcamera import GBCamera
 from gbprinter import GBPrinter
 from nikon import Nikon
+from hardware import Hardware
 from ds40 import DS40
 import cv2
-import numpy as np
 
 
-def addGameboyBorder(frame):
-    assert frame.shape[1] == 128 and frame.shape[0] == 112, "Frame is not 128x112"
-    gb_border = cv2.imread('gb_border.png')
-    gb_border[16:16+frame.shape[0], 16:16+frame.shape[1]] = frame
-    return gb_border
+def layoutPage(frames):
+    pass
 
-
-def gbColorize(frame):
-    colorFrame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-    # Define the color mapping for each grayscale value
-    color_map = {
-        0: [41, 65, 57],
-        96: [57, 89, 74],
-        178: [90, 121, 66],
-        255: [123, 130, 16]
-    }
-    for gray_val, color_val in color_map.items():
-        colorFrame[np.all(frame == [gray_val, gray_val, gray_val], axis=-1)] = color_val
-    return frame
+class PhotoGroup:
+    def __init__(self):
+        pass
 
 
 class Photobooth:
     def __init__(self):
+        #################### Parameters ####################
+        self.nCaptures = 3      # Number of frames to capture on each capture cycle
+        self.captureTimeout = 5 # Seconds between captures
+        ####################################################
+
+        # Hardware Interfaces
         self.gbCamera = GBCamera()
         self.gbPrinter = GBPrinter()
         self.nikon = Nikon()
         self.ds40 = DS40()
+        try:
+            self.hw = Hardware()
+        except:
+            print("no hw")
+            self.hw = None
+        self.windowName = "Photobooth"
+        if self.hw != None:
+            self.hw.registerCallback(0, self.captureAndPrint)
+        cv2.namedWindow(self.windowName, cv2.WND_PROP_FULLSCREEN)
+        cv2.setWindowProperty(self.windowName, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
+        # Flags
         self.running = True
+        self.capturing = False
+        self.captureFlag = False
+        self.printFlag = False
+
+        # Initialization
         self.gbThread = threading.Thread(target=self.gbCamera.run)
+        if self.hw is not None:
+            self.hwThread = threading.Thread(target=self.hw.run)
         self.gbThread.start()
+        if self.hw is not None:
+            self.hwThread.start()
+
 
     def run(self):
+        recentFrames = (None, None)
         while self.running:
-            gbFrame = self.gbCamera.getFrame()
-            gbFrameColor = gbColorize(gbFrame)
+            gbFrame = self.gbCamera.getFrame(color=True)
             if gbFrame is not None:
-                cv2.imshow('Camera', cv2.resize(gbFrameColor, (800, 700)))
+                cv2.imshow(self.windowName, cv2.resize(gbFrame, (0, 0), fx=4, fy=4))
             key = cv2.waitKey(1) & 0xFF
+            if self.captureFlag:
+                gbFile, gbFileBordered = self.gbCamera.capture()
+                nikonFile = self.nikon.capture()
+                recentFrames = (gbFile, nikonFile)
+                print("frame captured")
+                self.captureFlag = False
+            if self.printFlag:
+                # print
+                page = layoutPage(recentFrames)
+                self.ds40.print(page)
+                self.printFlag = False
             if key == ord('q'):
                 self.running = False
             elif key == ord('c'):
-                if gbFrame is not None:
-                    timestamp = int(time.time())
-                    cv2.imwrite(f'captures/frame_{timestamp}.png', gbFrame)
-                    cv2.imwrite(f'captures/frameBordered_{timestamp}.png', addGameboyBorder(gbFrame))
-                    self.gbPrinter.printFrame(gbFrame)
-                    print("frame captured")
+                self.capture()
         self.shutdown()
 
+    def capture(self):
+        """
+        Initiates a capture process
+        """
+        self.captureFlag = True
+
+    def print(self):
+        """
+        Initiates a print process
+        """
+        self.printFlag = True
+
+    def captureAndPrint(self):
+        """
+        Kicks off a capture and print process
+        """
+        self.capture()
+        self.print()
+
     def shutdown(self):
+        """
+        Shuts down all the things
+        """
         self.gbCamera.stop()
         self.gbThread.join()
         cv2.destroyAllWindows()
