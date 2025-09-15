@@ -1,18 +1,38 @@
 import threading
+from sys import exception
+
 from gbcamera import GBCamera
 from gbprinter import GBPrinter
 from nikon import Nikon
 from hardware import Hardware
 from ds40 import DS40
 import cv2
+import time
 
 
 def layoutPage(frames):
     pass
 
-class PhotoGroup:
-    def __init__(self):
+
+class PhotoSet:
+    def __init__(self, n):
+        self.time = time.time()
+        self.nCaptured = 0
+        self.slots = n
+        self.captures = []
+
+    def addPhoto(self, photo):
+        if self.n_captures() < self.slots:
+            self.captures.append(photo)
+            return 0
+        return 1
+
+    def n_captures(self):
+        return len(self.captures)
+
+    def save(self):
         pass
+
 
 
 class Photobooth:
@@ -43,6 +63,7 @@ class Photobooth:
         self.capturing = False
         self.captureFlag = False
         self.printFlag = False
+        self.captureTimer = 0 # seconds, countdown to a photo being taken
 
         # Initialization
         self.gbThread = threading.Thread(target=self.gbCamera.run)
@@ -58,7 +79,9 @@ class Photobooth:
         while self.running:
             gbFrame = self.gbCamera.getFrame(color=True)
             if gbFrame is not None:
+                # Display something on the monitor
                 cv2.imshow(self.windowName, cv2.resize(gbFrame, (0, 0), fx=4, fy=4))
+                #TODO: Display countdown during a capture
             key = cv2.waitKey(1) & 0xFF
             if self.captureFlag:
                 gbFile, gbFileBordered = self.gbCamera.capture()
