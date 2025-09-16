@@ -68,7 +68,7 @@ class CaptureEvent:
 @dataclass
 class PrintEvent:
     """Event for print operations"""
-    photos: List[Tuple[str, str]]
+    photos: List[Tuple[str, str, str]]
 
 
 @dataclass
@@ -89,14 +89,14 @@ class PhotoSet:
         self.created_at = time.time()
         self.max_photos = max_photos
         self.delay_between_photos = delay_between_photos
-        self.captures: List[Tuple[PhotoboothImage, PhotoboothImage]] = []  # (gb_image, nikon_image) pairs
+        self.captures: List[Tuple[PhotoboothImage, PhotoboothImage,PhotoboothImage]] = []  # (gb_image, gb_ai_image, nikon_image) pairs
         self.current_capture = 0
         self.session_id = f"session_{int(time.time())}"
 
-    def add_capture(self, gb_image: PhotoboothImage, nikon_image: PhotoboothImage) -> bool:
-        """Add a capture to the set. Returns True if successful, False if set is full."""
+    def add_capture(self, gb_image: PhotoboothImage, gb_ai_image: PhotoboothImage,nikon_image: PhotoboothImage) -> bool:
+        """Add a capture to the set. Returns True if successful, False if the set is full."""
         if len(self.captures) < self.max_photos:
-            self.captures.append((gb_image, nikon_image))
+            self.captures.append((gb_image, gb_ai_image, nikon_image))
             self.current_capture += 1
             return True
         return False
@@ -316,10 +316,10 @@ class Photobooth:
     def _handle_print_event(event: PrintEvent):
         """Handle print events"""
         try:
-            # TODO: Implement actual printing
+            filename = os.join("captures", "composite", f"session_{int(time.time())}.pdf")
             page = layout_page(event.photos)
-            # self.printer.print(page)
-            logger.info(f"Would print {len(event.photos)} photos")
+            page.save(filename, "PDF", resolution=100.0)
+            self.printer.print(filename)
         except Exception as e:
             logger.error(f"Printing failed: {e}")
 
@@ -365,8 +365,8 @@ class Photobooth:
         try:
             result = self._capture_future.result()
             if result and self.current_photo_set:
-                gb_file, nikon_file = result
-                self.current_photo_set.add_capture(gb_file, nikon_file)
+                gb_file, gb_file, nikon_file = result #TODO: replace the second gb_file with the ai-upscaled version
+                self.current_photo_set.add_capture(gb_file, gb_file, nikon_file)
                 logger.info(
                     f"Captured photo {self.current_photo_set.current_capture}/{self.config.photos_per_session}")
 
@@ -455,10 +455,55 @@ class Photobooth:
 
 
 def layout_page(frames):
-    """Layout function for printing"""
-    # TODO: Implement actual layout logic
+    """
+    Lay the full page out to be printed. Pages are printed onto perforated 6"x8" sheets,
+    which tear into three 2"x8" sheets each.
+    :param frames: List[Tuple[gb_image: str, gb_ai_image: str, nikon_image: str]]
+    :return: PIL Image with composite layout
+    """
+    # Page dimensions (in pixels at 300 DPI)
+    PAGE_WIDTH = 1800  # 6 inches * 300 DPI
+    PAGE_HEIGHT = 2400  # 8 inches * 300 DPI
+
+    # Layout configuration
+    MARGIN = 50  # pixels
+    COLUMN_WIDTH = (PAGE_WIDTH - (4 * MARGIN)) // 3
+    ROW_HEIGHT = (PAGE_HEIGHT - (5 * MARGIN)) // 4
+
+    # Create the blank white page
+    page = Image.new('RGB', (PAGE_WIDTH, PAGE_HEIGHT), 'white')
+    draw = ImageDraw.Draw(page)
+
     logger.info(f"Laying out page with {len(frames)} frames")
-    return None
+
+    # Calculate column starting positions
+    col_x = [
+        MARGIN,  # GB Camera column
+        2 * MARGIN + COLUMN_WIDTH,  # GB AI column
+        3 * MARGIN + 2 * COLUMN_WIDTH  # Nikon column
+    ]
+
+    # Place each set of images
+    for row, (gb_image, gb_ai_image, nikon_image) in enumerate(frames):
+        y = MARGIN + row * (ROW_HEIGHT + MARGIN)
+
+        # Load and resize images for each column
+        for col, image_path in enumerate([gb_image, gb_ai_image, nikon_image]):
+            try:
+                img = Image.open(image_path.path)
+                # Resize maintaining aspect ratio
+                img.thumbnail((COLUMN_WIDTH, ROW_HEIGHT))
+
+                # Center image in its cell
+                x_offset = col_x[col] + (COLUMN_WIDTH - img.width) // 2
+                y_offset = y + (ROW_HEIGHT - img.height) // 2
+
+                # Paste image
+                page.paste(img, (x_offset, y_offset))
+            except Exception as e:
+                logger.error(f"Error placing image {image_path}: {e}")
+
+    return page
 
 
 if __name__ == "__main__":

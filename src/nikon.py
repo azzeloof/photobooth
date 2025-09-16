@@ -13,7 +13,6 @@ from common import PhotoboothError, PhotoboothImage, ImageManager, ImageMetadata
 
 logger = logging.getLogger(__name__)
 
-
 @dataclass
 class NikonConfig:
     """Configuration for Nikon camera operations"""
