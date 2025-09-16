@@ -170,6 +170,7 @@ class PhotoboothImage:
 
         logger.debug(f"Loaded image from {self._file_path}: {self._data.shape}")
 
+
     def save(self,
              file_path: Optional[str] = None,
              format: ImageFormat = ImageFormat.PNG,

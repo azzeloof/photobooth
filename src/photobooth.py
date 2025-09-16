@@ -1,12 +1,14 @@
 import concurrent.futures
 import cv2
 import logging
+import os
 import queue
 import threading
 import time
 import numpy as np
 from dataclasses import dataclass
 from enum import Enum, auto
+from pathlib import Path
 from PIL import ImageFont, ImageDraw, Image
 from typing import Optional, List, Tuple
 from common import SystemStatus, PhotoboothImage, ImageManager
@@ -21,6 +23,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 overlay_font = ImageFont.truetype("fonts/Jersey_10/Jersey10-Regular.ttf", 128)
+
 
 class PhotoboothState(Enum):
     IDLE = auto()
@@ -161,6 +164,7 @@ class CameraManager:
                 # Capture from both cameras as PhotoboothImages
                 gb_regular, gb_bordered = self.gb_camera.capture(session_id)
                 nikon_image = self.nikon.capture_image(session_id)
+                gb_regular.save(os.path.join('captures', 'gameboy', f"gameboy_{gb_regular.metadata.timestamp}.png"))
                 return (gb_regular, nikon_image)
 
             except (GBCameraError, NikonError) as e:
@@ -312,12 +316,13 @@ class Photobooth:
             elif isinstance(event, PrintEvent):
                 self._handle_print_event(event)
 
-    @staticmethod
-    def _handle_print_event(event: PrintEvent):
+
+    def _handle_print_event(self, event: PrintEvent):
         """Handle print events"""
         try:
-            filename = os.join("captures", "composite", f"session_{int(time.time())}.pdf")
+            filename = os.path.join("captures", "composite", f"session_{int(time.time())}.pdf")
             page = layout_page(event.photos)
+            Path(filename).parent.mkdir(parents=True, exist_ok=True)
             page.save(filename, "PDF", resolution=100.0)
             self.printer.print(filename)
         except Exception as e:
@@ -365,8 +370,8 @@ class Photobooth:
         try:
             result = self._capture_future.result()
             if result and self.current_photo_set:
-                gb_file, gb_file, nikon_file = result #TODO: replace the second gb_file with the ai-upscaled version
-                self.current_photo_set.add_capture(gb_file, gb_file, nikon_file)
+                gb_file, nikon_file = result
+                self.current_photo_set.add_capture(gb_file, gb_file, nikon_file) #TODO: replace the second gb_file with the ai-upscaled version
                 logger.info(
                     f"Captured photo {self.current_photo_set.current_capture}/{self.config.photos_per_session}")
 
@@ -488,9 +493,9 @@ def layout_page(frames):
         y = MARGIN + row * (ROW_HEIGHT + MARGIN)
 
         # Load and resize images for each column
-        for col, image_path in enumerate([gb_image, gb_ai_image, nikon_image]):
+        for col, file in enumerate([gb_image, gb_ai_image, nikon_image]):
             try:
-                img = Image.open(image_path.path)
+                img = Image.open(file.file_path)
                 # Resize maintaining aspect ratio
                 img.thumbnail((COLUMN_WIDTH, ROW_HEIGHT))
 
@@ -501,7 +506,7 @@ def layout_page(frames):
                 # Paste image
                 page.paste(img, (x_offset, y_offset))
             except Exception as e:
-                logger.error(f"Error placing image {image_path}: {e}")
+                logger.error(f"Error placing image {file}: {e}")
 
     return page
 

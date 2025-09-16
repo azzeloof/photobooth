@@ -18,7 +18,8 @@ class DS40Error(PhotoboothError):
 class DS40:
     def __init__(self, printer_name=""):
         self.printer_name = printer_name
-        self.print_command = ["lp"].extend(["-d", printer_name])
+        self.print_command = ["lp"]
+        self.print_command.extend(["-d", printer_name])
 
     def print(self, file_path):
         """
