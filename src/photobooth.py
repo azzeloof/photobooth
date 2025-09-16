@@ -7,6 +7,7 @@ import time
 import numpy as np
 from dataclasses import dataclass
 from enum import Enum, auto
+from PIL import ImageFont, ImageDraw, Image
 from typing import Optional, List, Tuple
 from common import SystemStatus, PhotoboothImage, ImageManager
 from ds40 import DS40
@@ -19,6 +20,7 @@ from nikon import NikonCamera, NikonConfig, NikonError
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+overlay_font = ImageFont.truetype("fonts/Jersey_10/Jersey10-Regular.ttf", 128)
 
 class PhotoboothState(Enum):
     IDLE = auto()
@@ -403,33 +405,27 @@ class Photobooth:
             display_frame = cv2.resize(frame, (0, 0),
                                        fx=self.config.display_scale,
                                        fy=self.config.display_scale)
-
-            # Add state-specific overlays
-            self._add_state_overlay(display_frame)
-
+            if self.state == PhotoboothState.COUNTDOWN:
+                remaining = self.config.countdown_duration - (time.time() - self.countdown_start)
+                if remaining > 0:
+                    countdown_text = str(max(1, int(remaining)))
+                    frame_pil = Image.fromarray(display_frame)
+                    draw = ImageDraw.Draw(frame_pil)
+                    draw.text((50, 50), countdown_text, (0, 255, 0), font=overlay_font)
+                    display_frame = np.array(frame_pil)
+            elif self.state == PhotoboothState.CAPTURING:
+                frame_pil = Image.fromarray(display_frame)
+                draw = ImageDraw.Draw(frame_pil)
+                draw.text((50, 50), "SMILE!", (0, 255, 0), font=overlay_font)
+                display_frame = np.array(frame_pil)
+            #elif self.state == PhotoboothState.ERROR:
+            #    cv2.putText(display_frame, "ERROR - Press C to retry", (50, 100),
+            #                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            #elif self.current_photo_set:
+            #    progress_text = f"Photo {self.current_photo_set.current_capture}/{self.config.photos_per_session}"
+            #    cv2.putText(display_frame, progress_text, (50, 50),
+            #                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
             cv2.imshow(self.config.window_name, display_frame)
-
-    def _add_state_overlay(self, frame):
-        """Add overlay information based on the current state"""
-        if self.state == PhotoboothState.COUNTDOWN:
-            remaining = self.config.countdown_duration - (time.time() - self.countdown_start)
-            if remaining > 0:
-                countdown_text = str(max(1, int(remaining)))
-                cv2.putText(frame, countdown_text, (50, 100),
-                            cv2.FONT_HERSHEY_SIMPLEX, 3, (0, 255, 0), 3)
-
-        elif self.state == PhotoboothState.CAPTURING:
-            cv2.putText(frame, "SMILE!", (50, 100),
-                        cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 2)
-
-        elif self.state == PhotoboothState.ERROR:
-            cv2.putText(frame, "ERROR - Press C to retry", (50, 100),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-
-        elif self.current_photo_set:
-            progress_text = f"Photo {self.current_photo_set.current_capture}/{self.config.photos_per_session}"
-            cv2.putText(frame, progress_text, (50, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
 
     def _handle_keyboard_input(self):
         """Handle keyboard input"""
@@ -468,9 +464,9 @@ def layout_page(frames):
 if __name__ == "__main__":
     # Example with custom configuration
     config = PhotoboothConfig(
-        photos_per_session=4,
-        delay_between_photos=3.0,
-        countdown_duration=2.0,
+        photos_per_session=3,
+        delay_between_photos=4.0,
+        countdown_duration=4.0,
         gb_camera_config=GBCameraConfig(
             crop_start_x=100,
             crop_start_y=100
