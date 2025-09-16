@@ -186,6 +186,7 @@ class PhotoboothImage:
         Returns:
             Path where image was saved
         """
+        #TODO: if the file extension in file_path doesn't match the format, this hangs
         if self._data is None:
             raise ValueError("No image data to save")
 
