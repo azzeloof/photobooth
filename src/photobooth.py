@@ -213,6 +213,7 @@ class Photobooth:
         # Threading
         self.running = False
         self.state_lock = threading.Lock()
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
         # Timing
         self.countdown_start = 0
@@ -353,9 +354,9 @@ class Photobooth:
         """Initiate photo capture"""
         self.state = PhotoboothState.CAPTURING
 
-        # Use a thread pool for non-blocking capture
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            self._capture_future = executor.submit(self.camera_manager.capture_photos)
+        # Submit capture task to persistent executor (non-blocking)
+        session_id = self.current_photo_set.session_id if self.current_photo_set else None
+        self._capture_future = self.executor.submit(self.camera_manager.capture_photos, session_id)
 
     def _handle_capture_result(self):
         """Handle a completed photo capture"""
@@ -450,6 +451,10 @@ class Photobooth:
             self.hardware.stop()
 
         self.camera_manager.shutdown()
+        try:
+            self.executor.shutdown(wait=False, cancel_futures=True)
+        except Exception as e:
+            logger.warning(f"Executor shutdown warning: {e}")
         cv2.destroyAllWindows()
 
 
