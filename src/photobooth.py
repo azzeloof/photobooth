@@ -495,10 +495,12 @@ def layout_page(frames):
         # Load and resize images for each column
         for col, file in enumerate([gb_image, gb_ai_image, nikon_image]):
             try:
+                # This assumes landscape or square images
                 img = Image.open(file.file_path)
+                aspect = img.height/float(img.width)
                 # Resize maintaining aspect ratio
-                img.thumbnail((COLUMN_WIDTH, ROW_HEIGHT))
-
+                #img.thumbnail((COLUMN_WIDTH, ROW_HEIGHT))
+                img = img.resize((COLUMN_WIDTH, int(COLUMN_WIDTH*aspect)))
                 # Center image in its cell
                 x_offset = col_x[col] + (COLUMN_WIDTH - img.width) // 2
                 y_offset = y + (ROW_HEIGHT - img.height) // 2
