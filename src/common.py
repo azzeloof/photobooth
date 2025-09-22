@@ -196,6 +196,9 @@ class PhotoboothImage:
             timestamp_ms = int(time.time() * 1000)
             camera_type = self.metadata.camera_type
             file_path = f"{camera_type}_{timestamp_ms}.{format.value}"
+            self._file_path = file_path
+        else:
+            self._file_path = file_path
 
         # Ensure directory exists
         Path(file_path).parent.mkdir(parents=True, exist_ok=True)
@@ -209,7 +212,6 @@ class PhotoboothImage:
         if not success:
             raise IOError(f"Failed to save image to {file_path}")
 
-        self._file_path = file_path
         self._modified = False
         logger.info(f"Image saved to {file_path}")
         return file_path

@@ -419,6 +419,7 @@ class GBCamera:
             Tuple of (regular_image, bordered_image)
         """
         base_image = self.capture_image(session_id)
+        base_image.save()
 
         # Create bordered version
         try:
@@ -426,32 +427,13 @@ class GBCamera:
                 self.add_border,
                 "gameboy_border"
             )
+            bordered_image.metadata.camera_type = "gameboy_framed"
+            bordered_image.save()
         except GBCameraError as e:
             logger.warning(f"Could not create bordered version: {e}")
             bordered_image = base_image.copy()
 
-        return (base_image, bordered_image)
-
-    # Backwards compatibility method
-    def capture_to_files(self, session_id: Optional[str] = None) -> Tuple[str, str]:
-        """
-        Capture and save to files (backwards compatibility)
-
-        Returns:
-            Tuple of file paths (regular, bordered)
-        """
-        regular_image, bordered_image = self.capture(session_id)
-
-        # Save both images
-        timestamp = int(time.time() * 1000)
-        regular_path = regular_image.save(
-            os.path.join(self.config.capture_directory, f'frame_{timestamp}.png')
-        )
-        bordered_path = bordered_image.save(
-            os.path.join(self.config.capture_directory, f'frameBordered_{timestamp}.png')
-        )
-
-        return (regular_path, bordered_path)
+        return base_image, bordered_image
 
     def stop_thread(self):
         """Signals the capture thread to stop."""

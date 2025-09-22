@@ -167,9 +167,7 @@ class CameraManager:
                 gb_ai_regular, gb_ai_bordered = self._ai_upscale_gb_photo(gb_regular)
                 # Crop Nikon image to match GB aspect ratio (160/144 = 1.111...)
                 nikon_cropped = self._crop_to_gb_aspect_ratio(nikon_image)
-
-                gb_regular.save(os.path.join('captures', 'gameboy', f"gameboy_{gb_regular.metadata.timestamp}.png"))
-                return gb_regular, gb_ai_regular, nikon_cropped
+                return gb_bordered, gb_ai_bordered, nikon_cropped
 
             except (GBCameraError, NikonError) as e:
                 logger.error(f"Capture failed: {e}")
@@ -189,18 +187,13 @@ class CameraManager:
         except Exception as e:
             logger.error(f"AI border image load error: {e}")
             return None
-        ai_upscaled = photo.data.copy()
-        ai_upscaled.resize(ai_upscaled.shape*6)
+        ai_upscaled = cv2.resize(photo.data.copy(), None, fx=6, fy=6, interpolation=cv2.INTER_NEAREST)
         border_image[96:96+ai_upscaled.shape[0], 96:96+ai_upscaled.shape[1]] = ai_upscaled
-        timestamp = str(time.time())
-        ai_upscaled_image = PhotoboothImage(
-            data=ai_upscaled,
-            file_path=os.path.join("captures", "gameboy", "ai_upscaled", timestamp, ".png")
-        )
-        ai_upscaled_image_bordered = PhotoboothImage(
-            data=border_image,
-            file_path=os.path.join("captures", "gameboy", "ai_upscaled_framed", timestamp, ".png")
-        )
+        timestamp = str(int(time.time()*1000))
+        ai_upscaled_image = PhotoboothImage(data=ai_upscaled)
+        ai_upscaled_image.save(os.path.join("captures", "gameboy", f"gameboy_ai_{timestamp}.png"))
+        ai_upscaled_image_bordered = PhotoboothImage(data=border_image)
+        ai_upscaled_image_bordered.save(os.path.join("captures", "gameboy", f"gameboy_ai_framed_{timestamp}.png"))
         return ai_upscaled_image, ai_upscaled_image_bordered
 
     def _crop_to_gb_aspect_ratio(self, image: PhotoboothImage) -> PhotoboothImage:
@@ -429,8 +422,8 @@ class Photobooth:
         try:
             result = self._capture_future.result()
             if result and self.current_photo_set:
-                gb_file, nikon_file = result
-                self.current_photo_set.add_capture(gb_file, gb_file, nikon_file) #TODO: replace the second gb_file with the ai-upscaled version
+                gb_file, gb_ai_file, nikon_file = result
+                self.current_photo_set.add_capture(gb_file, gb_ai_file, nikon_file)
                 logger.info(
                     f"Captured photo {self.current_photo_set.current_capture}/{self.config.photos_per_session}")
 
