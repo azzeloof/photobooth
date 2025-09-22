@@ -593,7 +593,6 @@ def test_layout():
 
 if __name__ == "__main__":
     # Example with custom configuration
-    """
     config = PhotoboothConfig(
         photos_per_session=3,
         delay_between_photos=4.0,
@@ -610,5 +609,4 @@ if __name__ == "__main__":
 
     photobooth = Photobooth(config)
     photobooth.run()
-    """
-    test_layout()
+    #test_layout()
