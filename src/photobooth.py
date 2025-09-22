@@ -71,7 +71,7 @@ class CaptureEvent:
 @dataclass
 class PrintEvent:
     """Event for print operations"""
-    photos: List[Tuple[str, str, str]]
+    photos: List[Tuple[PhotoboothImage, PhotoboothImage, PhotoboothImage]]
 
 
 @dataclass
@@ -154,7 +154,7 @@ class CameraManager:
             logger.error(f"Unexpected error during camera initialization: {e}")
             return False
 
-    def capture_photos(self, session_id: str) -> Optional[Tuple[PhotoboothImage, PhotoboothImage]]:
+    def capture_photos(self, session_id: str) -> Optional[Tuple[PhotoboothImage, PhotoboothImage, PhotoboothImage]]:
         """Thread-safe photo capture returning PhotoboothImage objects"""
         if not self._initialized:
             return None
@@ -164,12 +164,12 @@ class CameraManager:
                 # Capture from both cameras as PhotoboothImages
                 gb_regular, gb_bordered = self.gb_camera.capture(session_id)
                 nikon_image = self.nikon.capture_image(session_id)
-
+                gb_ai_regular, gb_ai_bordered = self._ai_upscale_gb_photo(gb_regular)
                 # Crop Nikon image to match GB aspect ratio (160/144 = 1.111...)
                 nikon_cropped = self._crop_to_gb_aspect_ratio(nikon_image)
 
                 gb_regular.save(os.path.join('captures', 'gameboy', f"gameboy_{gb_regular.metadata.timestamp}.png"))
-                return (gb_regular, nikon_cropped)
+                return gb_regular, gb_ai_regular, nikon_cropped
 
             except (GBCameraError, NikonError) as e:
                 logger.error(f"Capture failed: {e}")
@@ -181,6 +181,27 @@ class CameraManager:
             preview_image = self.gb_camera.get_current_image(color=True)
             return preview_image.data if preview_image else None
         return None
+
+    @staticmethod
+    def _ai_upscale_gb_photo(photo: PhotoboothImage):
+        try:
+            border_image = cv2.imread("gb_ai_border.png")
+        except Exception as e:
+            logger.error(f"AI border image load error: {e}")
+            return None
+        ai_upscaled = photo.data.copy()
+        ai_upscaled.resize(ai_upscaled.shape*6)
+        border_image[96:96+ai_upscaled.shape[0], 96:96+ai_upscaled.shape[1]] = ai_upscaled
+        timestamp = str(time.time())
+        ai_upscaled_image = PhotoboothImage(
+            data=ai_upscaled,
+            file_path=os.path.join("captures", "gameboy", "ai_upscaled", timestamp, ".png")
+        )
+        ai_upscaled_image_bordered = PhotoboothImage(
+            data=border_image,
+            file_path=os.path.join("captures", "gameboy", "ai_upscaled_framed", timestamp, ".png")
+        )
+        return ai_upscaled_image, ai_upscaled_image_bordered
 
     def _crop_to_gb_aspect_ratio(self, image: PhotoboothImage) -> PhotoboothImage:
         """
@@ -461,13 +482,6 @@ class Photobooth:
                 draw = ImageDraw.Draw(frame_pil)
                 draw.text((50, 50), "SMILE!", (0, 255, 0), font=overlay_font)
                 display_frame = np.array(frame_pil)
-            #elif self.state == PhotoboothState.ERROR:
-            #    cv2.putText(display_frame, "ERROR - Press C to retry", (50, 100),
-            #                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-            #elif self.current_photo_set:
-            #    progress_text = f"Photo {self.current_photo_set.current_capture}/{self.config.photos_per_session}"
-            #    cv2.putText(display_frame, progress_text, (50, 50),
-            #                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
             cv2.imshow(self.config.window_name, display_frame)
 
     def _handle_keyboard_input(self):
@@ -481,25 +495,6 @@ class Photobooth:
             # Reset from an error state
             with self.state_lock:
                 self.state = PhotoboothState.IDLE
-
-    def _ai_upscale_gb_photo(self, photo: PhotoboothImage):
-        try:
-            border_image = cv2.imread("gb_ai_border.png")
-        except Exception as e:
-            logger.error(f"AI border image load error: {e}")
-            return None
-        ai_upscaled = None #TODO: replace with ai-upscaled image np array
-        border_image[96:96+ai_upscaled.shape[0], 96:96+ai_upscaled.shape[1]] = ai_upscaled
-        timestamp = str(time.time())
-        ai_upscaled_image = PhotoboothImage(
-            data=ai_upscaled,
-            file_path=os.path.join("captures", "gameboy", "ai_upscaled", timestamp, ".png")
-        )
-        ai_upscaled_image_bordered = PhotoboothImage(
-            data=border_image,
-            file_path=os.path.join("captures", "gameboy", "ai_upscaled_framed", timestamp, ".png")
-        )
-        return ai_upscaled_image, ai_upscaled_image_bordered
 
     def _shutdown(self):
         """Cleanup resources"""
