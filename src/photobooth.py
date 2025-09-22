@@ -462,7 +462,7 @@ class Photobooth:
 def layout_page(frames):
     """
     Lay the full page out to be printed. Pages are printed onto perforated 6"x8" sheets,
-    which tear into three 2"x8" sheets each.
+    which tear into three 2"x8" sheets.
     :param frames: List[Tuple[gb_image: str, gb_ai_image: str, nikon_image: str]]
     :return: PIL Image with composite layout
     """
@@ -472,8 +472,10 @@ def layout_page(frames):
 
     # Layout configuration
     MARGIN = 50  # pixels
+    TOP = 60 # pixels
+    BOTTOM = 120 # pixels
     COLUMN_WIDTH = (PAGE_WIDTH - (4 * MARGIN)) // 3
-    ROW_HEIGHT = (PAGE_HEIGHT - (5 * MARGIN)) // 4
+    ROW_HEIGHT = (PAGE_HEIGHT - TOP - BOTTOM - (5 * MARGIN)) // 4
 
     # Create the blank white page
     page = Image.new('RGB', (PAGE_WIDTH, PAGE_HEIGHT), 'white')
@@ -490,7 +492,7 @@ def layout_page(frames):
 
     # Place each set of images
     for row, (gb_image, gb_ai_image, nikon_image) in enumerate(frames):
-        y = MARGIN + row * (ROW_HEIGHT + MARGIN)
+        y = MARGIN + TOP + row * (ROW_HEIGHT + MARGIN)
 
         # Load and resize images for each column
         for col, file in enumerate([gb_image, gb_ai_image, nikon_image]):
