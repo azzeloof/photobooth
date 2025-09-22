@@ -192,6 +192,7 @@ class PhotoboothImage:
 
         # Generate file path if not provided
         if file_path is None:
+            #TODO: does this crash if there's no metadata?
             timestamp_ms = int(time.time() * 1000)
             camera_type = self.metadata.camera_type
             file_path = f"{camera_type}_{timestamp_ms}.{format.value}"
@@ -248,6 +249,24 @@ class PhotoboothImage:
         new_image._data = cropped_data
         new_image._modified = True
         new_image.metadata.processing_applied.append(f"crop_{x}_{y}_{width}_{height}")
+        
+        # Generate filename with 'cropped' in it
+        if new_image._file_path:
+            # Get the original file path parts
+            path = Path(new_image._file_path)
+            name_without_ext = path.stem
+            extension = path.suffix
+            # Add 'cropped' to the filename
+            new_filename = f"{name_without_ext}_cropped{extension}"
+            new_file_path = path.parent / new_filename
+            new_image.save(str(new_file_path))
+        else:
+            # If no original file path, use timestamp with 'cropped'
+            timestamp_ms = int(time.time() * 1000)
+            camera_type = new_image.metadata.camera_type
+            cropped_filename = f"{camera_type}_{timestamp_ms}_cropped.png"
+            new_image.save(cropped_filename)
+        
         return new_image
 
     def apply_processing(self, processor_func, processor_name: str = "custom") -> 'PhotoboothImage':
@@ -275,7 +294,9 @@ class PhotoboothImage:
     @classmethod
     def from_file(cls, file_path: str, metadata: Optional[ImageMetadata] = None) -> 'PhotoboothImage':
         """Create PhotoboothImage from file"""
-        return cls(file_path=file_path, metadata=metadata)
+        new_photo = cls(file_path=file_path, metadata=metadata)
+        new_photo._load_from_file()
+        return new_photo
 
     @classmethod
     def from_array(cls, data: np.ndarray, metadata: Optional[ImageMetadata] = None) -> 'PhotoboothImage':

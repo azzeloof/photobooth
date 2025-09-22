@@ -164,8 +164,12 @@ class CameraManager:
                 # Capture from both cameras as PhotoboothImages
                 gb_regular, gb_bordered = self.gb_camera.capture(session_id)
                 nikon_image = self.nikon.capture_image(session_id)
+
+                # Crop Nikon image to match GB aspect ratio (160/144 = 1.111...)
+                nikon_cropped = self._crop_to_gb_aspect_ratio(nikon_image)
+
                 gb_regular.save(os.path.join('captures', 'gameboy', f"gameboy_{gb_regular.metadata.timestamp}.png"))
-                return (gb_regular, nikon_image)
+                return (gb_regular, nikon_cropped)
 
             except (GBCameraError, NikonError) as e:
                 logger.error(f"Capture failed: {e}")
@@ -177,6 +181,40 @@ class CameraManager:
             preview_image = self.gb_camera.get_current_image(color=True)
             return preview_image.data if preview_image else None
         return None
+
+    def _crop_to_gb_aspect_ratio(self, image: PhotoboothImage) -> PhotoboothImage:
+        """
+        Crop image to match Game Boy camera aspect ratio (160/144)
+
+        Args:
+            image: PhotoboothImage to crop
+
+        Returns:
+            Cropped PhotoboothImage with GB aspect ratio
+        """
+        target_aspect_ratio = 160.0 / 144.0  # GB camera aspect ratio
+
+        # Get current image dimensions
+        height, width = image.shape[:2]
+        current_aspect_ratio = width / height
+
+        if abs(current_aspect_ratio - target_aspect_ratio) < 0.001:
+            # Already the correct aspect ratio
+            return image
+
+        if current_aspect_ratio > target_aspect_ratio:
+            # Image is too wide, crop width
+            new_width = int(height * target_aspect_ratio)
+            x_offset = (width - new_width) // 2
+            cropped = image.crop(x_offset, 0, new_width, height)
+        else:
+            # Image is too tall, crop height
+            new_height = int(width / target_aspect_ratio)
+            y_offset = (height - new_height) // 2
+            cropped = image.crop(0, y_offset, width, new_height)
+
+        logger.info(f"Cropped Nikon image from {width}x{height} to {cropped.shape[1]}x{cropped.shape[0]} for GB aspect ratio")
+        return cropped
 
     def shutdown(self):
         """Cleanup cameras"""
@@ -444,6 +482,25 @@ class Photobooth:
             with self.state_lock:
                 self.state = PhotoboothState.IDLE
 
+    def _ai_upscale_gb_photo(self, photo: PhotoboothImage):
+        try:
+            border_image = cv2.imread("gb_ai_border.png")
+        except Exception as e:
+            logger.error(f"AI border image load error: {e}")
+            return None
+        ai_upscaled = None #TODO: replace with ai-upscaled image np array
+        border_image[96:96+ai_upscaled.shape[0], 96:96+ai_upscaled.shape[1]] = ai_upscaled
+        timestamp = str(time.time())
+        ai_upscaled_image = PhotoboothImage(
+            data=ai_upscaled,
+            file_path=os.path.join("captures", "gameboy", "ai_upscaled", timestamp, ".png")
+        )
+        ai_upscaled_image_bordered = PhotoboothImage(
+            data=border_image,
+            file_path=os.path.join("captures", "gameboy", "ai_upscaled_framed", timestamp, ".png")
+        )
+        return ai_upscaled_image, ai_upscaled_image_bordered
+
     def _shutdown(self):
         """Cleanup resources"""
         logger.info("Shutting down photobooth...")
@@ -459,23 +516,23 @@ class Photobooth:
         cv2.destroyAllWindows()
 
 
-def layout_page(frames):
+def layout_page(frames: List[Tuple[PhotoboothImage, PhotoboothImage, PhotoboothImage]]) -> Image:
     """
     Lay the full page out to be printed. Pages are printed onto perforated 6"x8" sheets,
-    which tear into three 2"x8" sheets.
-    :param frames: List[Tuple[gb_image: str, gb_ai_image: str, nikon_image: str]]
+    which tear into three 2"x8" sheets each.
+    :param frames: List[Tuple[gb_image: PhotoboothImage, gb_ai_image: PhotoboothImage, nikon_image: PhotoboothImage]]
     :return: PIL Image with composite layout
     """
+    assert(len(frames) == 3)
+    assert(len(frames[0]) == 3)
     # Page dimensions (in pixels at 300 DPI)
     PAGE_WIDTH = 1800  # 6 inches * 300 DPI
     PAGE_HEIGHT = 2400  # 8 inches * 300 DPI
 
     # Layout configuration
     MARGIN = 50  # pixels
-    TOP = 60 # pixels
-    BOTTOM = 120 # pixels
-    COLUMN_WIDTH = (PAGE_WIDTH - (4 * MARGIN)) // 3
-    ROW_HEIGHT = (PAGE_HEIGHT - TOP - BOTTOM - (5 * MARGIN)) // 4
+    COLUMN_WIDTH = (PAGE_WIDTH - (4 * MARGIN)) // len(frames)  # Width per session column
+    ROW_HEIGHT = (PAGE_HEIGHT - (4 * MARGIN)) // 4  # Height per image type row
 
     # Create the blank white page
     page = Image.new('RGB', (PAGE_WIDTH, PAGE_HEIGHT), 'white')
@@ -483,36 +540,55 @@ def layout_page(frames):
 
     logger.info(f"Laying out page with {len(frames)} frames")
 
-    # Calculate column starting positions
-    col_x = [
-        MARGIN,  # GB Camera column
-        2 * MARGIN + COLUMN_WIDTH,  # GB AI column
-        3 * MARGIN + 2 * COLUMN_WIDTH  # Nikon column
-    ]
+    # Calculate column starting positions (one per session)
+    col_x = [MARGIN + session * (COLUMN_WIDTH + MARGIN) for session in range(len(frames))]
 
-    # Place each set of images
-    for row, (gb_image, gb_ai_image, nikon_image) in enumerate(frames):
-        y = MARGIN + TOP + row * (ROW_HEIGHT + MARGIN)
+    # Place images by image type (row) and session (column)
+    for session, (gb_image, gb_ai_image, nikon_image) in enumerate(frames):
+        images_by_type = [gb_image, gb_ai_image, nikon_image]
 
-        # Load and resize images for each column
-        for col, file in enumerate([gb_image, gb_ai_image, nikon_image]):
+        for image_type, image in enumerate(images_by_type):
+            # Calculate position
+            x = col_x[session]
+            y = MARGIN + image_type * (ROW_HEIGHT + MARGIN)
+
             try:
-                # This assumes landscape or square images
-                img = Image.open(file.file_path)
-                aspect = img.height/float(img.width)
-                # Resize maintaining aspect ratio
-                #img.thumbnail((COLUMN_WIDTH, ROW_HEIGHT))
-                img = img.resize((COLUMN_WIDTH, int(COLUMN_WIDTH*aspect)))
+                img = Image.open(image.file_path)
+                aspect = img.height / float(img.width)
+                img = img.resize((COLUMN_WIDTH, int(COLUMN_WIDTH * aspect)))
                 # Center image in its cell
-                x_offset = col_x[col] + (COLUMN_WIDTH - img.width) // 2
+                x_offset = x + (COLUMN_WIDTH - img.width) // 2
                 y_offset = y + (ROW_HEIGHT - img.height) // 2
 
                 # Paste image
                 page.paste(img, (x_offset, y_offset))
             except Exception as e:
-                logger.error(f"Error placing image {file}: {e}")
+                logger.error(f"Error placing image {image}: {e}")
 
     return page
+
+
+def test_layout():
+    cm = CameraManager(PhotoboothConfig())
+    frames = [
+        (
+            PhotoboothImage.from_file("captures/gameboy/gb1.png"),
+            PhotoboothImage.from_file("captures/gameboy/gb_ai1.png"),
+            cm._crop_to_gb_aspect_ratio(PhotoboothImage.from_file("captures/nikon/nikon1.jpg"))
+        ),
+        (
+            PhotoboothImage.from_file("captures/gameboy/gb2.png"),
+            PhotoboothImage.from_file("captures/gameboy/gb_ai2.png"),
+            cm._crop_to_gb_aspect_ratio(PhotoboothImage.from_file("captures/nikon/nikon2.jpg"))
+        ),
+        (
+            PhotoboothImage.from_file("captures/gameboy/gb3.png"),
+            PhotoboothImage.from_file("captures/gameboy/gb_ai3.png"),
+            cm._crop_to_gb_aspect_ratio(PhotoboothImage.from_file("captures/nikon/nikon3.jpg"))
+        )
+    ]
+    layout = layout_page(frames)
+    layout.save("captures/test.pdf", "PDF", resolution=100.0)
 
 
 if __name__ == "__main__":
@@ -533,3 +609,4 @@ if __name__ == "__main__":
 
     photobooth = Photobooth(config)
     photobooth.run()
+    #test_layout()
