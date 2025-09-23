@@ -39,10 +39,11 @@ class DisplayManager:
         draw = ImageDraw.Draw(frame_pil)
 
         if state == self.PhotoboothState.IDLE:
-            self._draw_text(draw, "PRESS BUTTON")
+            #self._draw_text(draw, "PRESS BUTTON")
+            pass
 
         elif state == self.PhotoboothState.COUNTDOWN:
-            if countdown_remaining > 0.5:  # Buffer to show "SMILE!"
+            if countdown_remaining > 1.1:  # Buffer to show "SMILE!"
                 countdown_text = str(int(np.ceil(countdown_remaining)))
                 self._draw_text(draw, countdown_text)
             else:
@@ -52,7 +53,7 @@ class DisplayManager:
             self._draw_text(draw, "CAPTURING...")
 
         elif state == self.PhotoboothState.PROCESSING:
-            self._draw_text(draw, "PLEASE WAIT...")
+            self._draw_text(draw, "WAIT...")
 
         display_frame = np.array(frame_pil)
         cv2.imshow(self.window_name, display_frame)
