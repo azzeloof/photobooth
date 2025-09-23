@@ -2,18 +2,16 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from enum import Enum
-
+from common import PhotoboothState
 
 class DisplayManager:
     """Manages all display-related operations for the photobooth."""
 
-    def __init__(self, window_name: str, fullscreen: bool, scale: float, font: ImageFont.FreeTypeFont,
-                 state_enum: Enum):
+    def __init__(self, window_name: str, fullscreen: bool, scale: float, font: ImageFont.FreeTypeFont):
         self.window_name = window_name
         self.fullscreen = fullscreen
         self.display_scale = scale
         self.font = font
-        self.PhotoboothState = state_enum  # Pass the Enum type itself
 
         cv2.namedWindow(self.window_name, cv2.WND_PROP_FULLSCREEN)
         if self.fullscreen:
@@ -38,29 +36,28 @@ class DisplayManager:
         frame_pil = Image.fromarray(display_frame)
         draw = ImageDraw.Draw(frame_pil)
 
-        if state == self.PhotoboothState.IDLE:
+        if state == PhotoboothState.IDLE:
             #self._draw_text(draw, "PRESS BUTTON")
             pass
 
-        elif state == self.PhotoboothState.COUNTDOWN:
+        elif state == PhotoboothState.COUNTDOWN:
             if countdown_remaining > 1.1:  # Buffer to show "SMILE!"
                 countdown_text = str(int(np.ceil(countdown_remaining)))
                 self._draw_text(draw, countdown_text)
             else:
                 self._draw_text(draw, "SMILE!")
 
-        elif state == self.PhotoboothState.CAPTURING:
+        elif state == PhotoboothState.CAPTURING:
             self._draw_text(draw, "CAPTURING...")
 
-        elif state == self.PhotoboothState.PROCESSING:
+        elif state == PhotoboothState.PROCESSING:
             self._draw_text(draw, "WAIT...")
 
         display_frame = np.array(frame_pil)
         cv2.imshow(self.window_name, display_frame)
 
-    def _draw_text(self, draw: ImageDraw.Draw, text: str):
+    def _draw_text(self, draw: ImageDraw.ImageDraw, text: str):
         """Helper to draw centered text on the frame."""
-        # Note: textbbox is more accurate for centering than textlength
         bbox = draw.textbbox((0, 0), text, font=self.font)
         text_width = bbox[2] - bbox[0]
         text_height = bbox[3] - bbox[1]
@@ -71,6 +68,7 @@ class DisplayManager:
         y = (img_height - text_height) / 4  # Position text 1/4 down the screen
         draw.text((x, y), text, font=self.font, fill=(0, 255, 0, 255))
 
-    def destroy_windows(self):
+    @staticmethod
+    def destroy_windows():
         """Closes all OpenCV windows."""
         cv2.destroyAllWindows()

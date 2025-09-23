@@ -10,9 +10,17 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+class PhotoboothState(Enum):
+    IDLE = auto()
+    COUNTDOWN = auto()
+    CAPTURING = auto()
+    PROCESSING = auto()
+    PRINTING = auto()
+    ERROR = auto()
 
 
 class PhotoboothError(Exception):
@@ -95,7 +103,7 @@ class ImageMetadata:
 
     @property
     def formatted_timestamp(self) -> str:
-        """Get human-readable timestamp"""
+        """Get the human-readable timestamp"""
         return time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime(self.timestamp))
 
 
@@ -109,7 +117,7 @@ class PhotoboothImage:
                  file_path: Optional[str] = None,
                  metadata: Optional[ImageMetadata] = None):
         """
-        Initialize image from either numpy array or file path
+        Initialize the image from either numpy array or file path
 
         Args:
             data: OpenCV image data (np.ndarray)
@@ -119,7 +127,7 @@ class PhotoboothImage:
         self._data: Optional[np.ndarray] = data
         self._file_path: Optional[str] = file_path
         self.metadata = metadata or ImageMetadata()
-        self._modified = False  # Track if in-memory data differs from file
+        self._modified = False  # Track if in-memory data differs from that in the file
 
         # Validation
         if data is None and file_path is None:
@@ -127,7 +135,7 @@ class PhotoboothImage:
 
     @property
     def data(self) -> np.ndarray:
-        """Get image data as OpenCV array, loading from file if necessary"""
+        """Get image data as OpenCV array, loading from the file if necessary"""
         if self._data is None and self._file_path:
             self._load_from_file()
 
@@ -138,7 +146,7 @@ class PhotoboothImage:
 
     @property
     def file_path(self) -> Optional[str]:
-        """Get current file path"""
+        """Get the current file path"""
         return self._file_path
 
     @property
@@ -156,7 +164,7 @@ class PhotoboothImage:
         """Get image size as (width, height)"""
         if self.is_loaded:
             h, w = self.data.shape[:2]
-            return (w, h)
+            return w, h
         return None
 
     def _load_from_file(self):
@@ -173,14 +181,14 @@ class PhotoboothImage:
 
     def save(self,
              file_path: Optional[str] = None,
-             format: ImageFormat = ImageFormat.PNG,
+             file_format: ImageFormat = ImageFormat.PNG,
              quality: int = 95) -> str:
         """
         Save image to file
 
         Args:
             file_path: Target file path (generates timestamp-based name if None)
-            format: Image format
+            file_format: Image format
             quality: JPEG quality (0-100)
 
         Returns:
@@ -190,12 +198,12 @@ class PhotoboothImage:
         if self._data is None:
             raise ValueError("No image data to save")
 
-        # Generate file path if not provided
+        # Generate the file path if not provided
         if file_path is None:
             #TODO: does this crash if there's no metadata?
             timestamp_ms = int(time.time() * 1000)
             camera_type = self.metadata.camera_type
-            file_path = f"{camera_type}_{timestamp_ms}.{format.value}"
+            file_path = f"{camera_type}_{timestamp_ms}.{file_format.value}"
             self._file_path = file_path
         else:
             self._file_path = file_path
@@ -204,7 +212,7 @@ class PhotoboothImage:
         Path(file_path).parent.mkdir(parents=True, exist_ok=True)
 
         # Set quality for JPEG
-        if format == ImageFormat.JPEG:
+        if file_format == ImageFormat.JPEG:
             success = cv2.imwrite(file_path, self._data, [cv2.IMWRITE_JPEG_QUALITY, quality])
         else:
             success = cv2.imwrite(file_path, self._data)
@@ -252,7 +260,7 @@ class PhotoboothImage:
         new_image._modified = True
         new_image.metadata.processing_applied.append(f"crop_{x}_{y}_{width}_{height}")
         
-        # Generate filename with 'cropped' in it
+        # Generate the filename with 'cropped' in it
         if new_image._file_path:
             # Get the original file path parts
             path = Path(new_image._file_path)
@@ -287,7 +295,7 @@ class PhotoboothImage:
         return new_image
 
     def display(self, window_name: str = "Image", scale: float = 1.0):
-        """Display image in OpenCV window"""
+        """Display image in the OpenCV window"""
         display_data = self.data
         if scale != 1.0:
             display_data = cv2.resize(display_data, (0, 0), fx=scale, fy=scale)
@@ -295,14 +303,14 @@ class PhotoboothImage:
 
     @classmethod
     def from_file(cls, file_path: str, metadata: Optional[ImageMetadata] = None) -> 'PhotoboothImage':
-        """Create PhotoboothImage from file"""
+        """Create a PhotoboothImage from a file"""
         new_photo = cls(file_path=file_path, metadata=metadata)
         new_photo._load_from_file()
         return new_photo
 
     @classmethod
     def from_array(cls, data: np.ndarray, metadata: Optional[ImageMetadata] = None) -> 'PhotoboothImage':
-        """Create PhotoboothImage from numpy array"""
+        """Create a PhotoboothImage from a numpy array"""
         return cls(data=data, metadata=metadata)
 
     def __str__(self) -> str:
@@ -318,16 +326,18 @@ class ImageManager:
         self.base_directory.mkdir(parents=True, exist_ok=True)
 
     def create_session_directory(self, session_id: str) -> Path:
-        """Create directory for a photo session"""
+        """Create the directory for a photo session"""
         session_dir = self.base_directory / session_id
         session_dir.mkdir(exist_ok=True)
         return session_dir
 
-    def generate_filename(self, camera_type: str, session_id: str,
-                          image_index: int, format: ImageFormat = ImageFormat.PNG) -> str:
+    @staticmethod
+    def generate_filename(camera_type: str, session_id: str,
+                          image_index: int, file_format: ImageFormat = ImageFormat.PNG) -> str:
         """Generate standardized filename"""
         timestamp = int(time.time() * 1000)
-        return f"{camera_type}_{session_id}_{image_index:03d}_{timestamp}.{format.value}"
+        return f"{camera_type}_{session_id}_{image_index:03d}_{timestamp}.{file_format.value}"
+
 
     def save_session_images(self, images: list, session_id: str) -> list:
         """Save all images in a session with consistent naming"""

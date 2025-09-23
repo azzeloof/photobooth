@@ -7,17 +7,15 @@ import threading
 import time
 import numpy as np
 from dataclasses import dataclass
-from enum import Enum, auto
 from pathlib import Path
 from PIL import ImageFont, ImageDraw, Image
 from typing import Optional, List, Tuple
-from common import SystemStatus, PhotoboothImage, ImageManager, ImageMetadata
+from common import SystemStatus, PhotoboothImage, ImageManager, ImageMetadata, PhotoboothState
 from ds40 import DS40
 from gbcamera import GBCamera, GBCameraConfig, GBCameraError
 from gbprinter import GBPrinter
 from hardware import Hardware, HardwareConfig, HardwareError
 from nikon import NikonCamera, NikonConfig, NikonError
-# NEW: Import the DisplayManager
 from display import DisplayManager
 
 # Configure logging
@@ -25,16 +23,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 overlay_font = ImageFont.truetype("fonts/Jersey_10/Jersey10-Regular.ttf", 128)
-
-
-class PhotoboothState(Enum):
-    IDLE = auto()
-    COUNTDOWN = auto()
-    CAPTURING = auto()
-    PROCESSING = auto()  # NEW STATE
-    PRINTING = auto()
-    ERROR = auto()
-
 
 @dataclass
 class PhotoboothConfig:
@@ -64,7 +52,6 @@ class PhotoboothConfig:
             self.hardware_config = HardwareConfig()
 
 
-# --- NEW AND UPDATED EVENT CLASSES ---
 @dataclass
 class StartSessionEvent:
     """Event to start a new photo session."""
@@ -191,21 +178,22 @@ class CameraManager:
                 return None
 
     def get_preview_frame(self) -> Optional[np.ndarray]:
-        """Get current preview frame as numpy array for display"""
+        """Get the current preview frame as a numpy array for display"""
         if self.gb_camera and self.gb_camera.is_initialized:
             preview_image = self.gb_camera.get_current_image(color=True)
             return preview_image.data if preview_image else None
         return None
 
-    def _crop_to_gb_aspect_ratio(self, image: PhotoboothImage) -> PhotoboothImage:
+    @staticmethod
+    def _crop_to_gb_aspect_ratio(image: PhotoboothImage) -> PhotoboothImage:
         """
-        Crop image to match Game Boy camera aspect ratio (160/144)
+        Crop image to match the Game Boy camera aspect ratio (160/144)
 
         Args:
             image: PhotoboothImage to crop
 
         Returns:
-            Cropped PhotoboothImage with GB aspect ratio
+            Cropped PhotoboothImage with the Game Boy aspect ratio
         """
         target_aspect_ratio = 160.0 / 144.0  # GB camera aspect ratio
 
@@ -269,13 +257,11 @@ class Photobooth:
         self.printer = DS40()
         self.gb_printer = GBPrinter()
         self.hardware: Optional[Hardware] = None
-        # NEW: DisplayManager instance
         self.display_manager = DisplayManager(
             self.config.window_name,
             self.config.fullscreen,
             self.config.display_scale,
-            overlay_font,
-            PhotoboothState
+            overlay_font
         )
 
         # Threading
@@ -283,7 +269,7 @@ class Photobooth:
         self.state_lock = threading.Lock()
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
-        # Timing (simplified)
+        # Timing
         self.countdown_end_time = 0
 
         # Initialize components
@@ -315,7 +301,7 @@ class Photobooth:
             self._transition_to_error("Camera initialization failed")
 
     def _on_capture_button(self):
-        """Hardware button callback - now posts a StartSessionEvent"""
+        """Hardware button callback"""
         self.event_queue.put(StartSessionEvent())
 
     def _transition_to_error(self, message: str):
@@ -325,7 +311,7 @@ class Photobooth:
             logger.error(f"Error state: {message}")
 
     def run(self):
-        """Main application loop - simplified"""
+        """Main application loop"""
         self.running = True
 
         if self.hardware:
@@ -352,9 +338,7 @@ class Photobooth:
             pass
 
     def _handle_event(self, event):
-        """
-        REFACTORED: Central hub for all state transitions and logic.
-        """
+        """Central hub for all state transitions and logic"""
         with self.state_lock:
             if isinstance(event, StartSessionEvent) and self.state == PhotoboothState.IDLE:
                 self._start_capture_session()
@@ -397,7 +381,7 @@ class Photobooth:
                         lambda: self.event_queue.put(CapturePhotoEvent())).start()
 
     def _capture_photo(self):
-        """Initiate photo capture and transition to PROCESSING state."""
+        """Initiate photo capture and transition to the PROCESSING state."""
         self.state = PhotoboothState.CAPTURING
         session_id = self.current_photo_set.session_id if self.current_photo_set else None
 
@@ -407,7 +391,7 @@ class Photobooth:
         self.state = PhotoboothState.PROCESSING  # Show "PLEASE WAIT..." immediately
 
     def _on_capture_future_done(self, future):
-        """Callback executed when capture task finishes. Puts result on event queue."""
+        """Callback executed when the capture task finishes. Puts result in the event queue."""
         try:
             result = future.result()
             if result:
@@ -498,13 +482,13 @@ class Photobooth:
             logger.error(f"Printing failed: {e}")
 
     def _render_display(self):
-        """REFACTORED: Delegates all rendering to the DisplayManager."""
+        """Delegates all rendering tasks to the DisplayManager."""
         frame = self.camera_manager.get_preview_frame()
 
-        # Calculate remaining time for countdown if applicable
-        countdown_remaining = 0
+        # Calculate the remaining time for the countdown if applicable
+        countdown_remaining = 0.0
         if self.state == PhotoboothState.COUNTDOWN:
-            countdown_remaining = max(0, self.countdown_end_time - time.time())
+            countdown_remaining = max(0.0, self.countdown_end_time - time.time())
 
         self.display_manager.render(frame, self.state, countdown_remaining)
 
@@ -535,32 +519,31 @@ class Photobooth:
             logger.warning(f"Executor shutdown warning: {e}")
 
 
-def layout_page(frames: List[Tuple[PhotoboothImage, PhotoboothImage, PhotoboothImage]]) -> Image:
+def layout_page(frames: List[Tuple[PhotoboothImage, PhotoboothImage, PhotoboothImage]]):
     """
     Lay the full page out to be printed. Pages are printed onto perforated 6"x8" sheets,
     which tear into three 2"x8" sheets each.
     :param frames: List[Tuple[gb_image: PhotoboothImage, gb_ai_image: PhotoboothImage, nikon_image: PhotoboothImage]]
     :return: PIL Image with composite layout
     """
+    ######### Parameters #########
+    page_width = 1800  # 6 inches * 300 DPI
+    page_height = 2400  # 8 inches * 300 DPI
+    margin = 50  # pixels
+    column_width = (page_width - (4 * margin)) // len(frames)  # Width per column
+    row_height = (page_height - (4 * margin)) // 4  # Height per image type row
+    ##############################
     assert (len(frames) == 3)
     assert (len(frames[0]) == 3)
-    # Page dimensions (in pixels at 300 DPI)
-    PAGE_WIDTH = 1800  # 6 inches * 300 DPI
-    PAGE_HEIGHT = 2400  # 8 inches * 300 DPI
-
-    # Layout configuration
-    MARGIN = 50  # pixels
-    COLUMN_WIDTH = (PAGE_WIDTH - (4 * MARGIN)) // len(frames)  # Width per session column
-    ROW_HEIGHT = (PAGE_HEIGHT - (4 * MARGIN)) // 4  # Height per image type row
 
     # Create the blank white page
-    page = Image.new('RGB', (PAGE_WIDTH, PAGE_HEIGHT), 'white')
-    draw = ImageDraw.Draw(page)
+    page = Image.new('RGB', (page_width, page_height), 'white')
+    ImageDraw.Draw(page)
 
     logger.info(f"Laying out page with {len(frames)} frames")
 
     # Calculate column starting positions (one per session)
-    col_x = [MARGIN + session * (COLUMN_WIDTH + MARGIN) for session in range(len(frames))]
+    col_x = [margin + session * (column_width + margin) for session in range(len(frames))]
 
     # Place images by image type (row) and session (column)
     for session, (gb_image, gb_ai_image, nikon_image) in enumerate(frames):
@@ -569,15 +552,15 @@ def layout_page(frames: List[Tuple[PhotoboothImage, PhotoboothImage, PhotoboothI
         for image_type, image in enumerate(images_by_type):
             # Calculate position
             x = col_x[session]
-            y = MARGIN + image_type * (ROW_HEIGHT + MARGIN)
+            y = margin + image_type * (row_height + margin)
 
             try:
                 img = Image.open(image.file_path)
                 aspect = img.height / float(img.width)
-                img = img.resize((COLUMN_WIDTH, int(COLUMN_WIDTH * aspect)))
+                img = img.resize((column_width, int(column_width * aspect)))
                 # Center image in its cell
-                x_offset = x + (COLUMN_WIDTH - img.width) // 2
-                y_offset = y + (ROW_HEIGHT - img.height) // 2
+                x_offset = x + (column_width - img.width) // 2
+                y_offset = y + (row_height - img.height) // 2
 
                 # Paste image
                 page.paste(img, (x_offset, y_offset))
