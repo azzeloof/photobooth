@@ -15,11 +15,11 @@ logger = logging.getLogger(__name__)
 class GBCameraConfig:
     """Configuration for Game Boy camera effects"""
     # Crop settings
-    crop_start_x: int = 128
-    crop_start_y: int = 128
+    crop_start_x: int = 511
+    crop_start_y: int = 147
     crop_width: int = 128
     crop_height: int = 112
-    crop_scale: int = 8
+    crop_scale: int = 7
 
     # Quantization levels (Game Boy has 4 shades)
     quantization_levels: Tuple[int, int, int, int] = (0, 96, 178, 255)
@@ -35,7 +35,7 @@ class GBCameraConfig:
 
     # File paths
     border_image_path: str = "gb_border.png"
-    capture_directory: str = "captures"
+    capture_directory: str = "captures/gameboy"
 
 
 class GBCameraError(PhotoboothError):
@@ -72,7 +72,8 @@ class GBCamera:
         """Initialize the camera with proper error handling"""
         try:
             self.cam = cv2.VideoCapture(self.device)
-
+            self.cam.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+            self.cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
             if not self.cam.isOpened():
                 raise GBCameraError(f"Could not open camera device {self.device}")
 
@@ -419,7 +420,12 @@ class GBCamera:
             Tuple of (regular_image, bordered_image)
         """
         base_image = self.capture_image(session_id)
-        base_image.save()
+
+        # Create proper file path for base image
+        timestamp_ms = int(base_image.metadata.timestamp * 1000)
+        base_filename = f"gameboy_{timestamp_ms}.png"
+        base_filepath = os.path.join(self.config.capture_directory, base_filename)
+        base_image.save(base_filepath)
 
         # Create bordered version
         try:
@@ -428,7 +434,11 @@ class GBCamera:
                 "gameboy_border"
             )
             bordered_image.metadata.camera_type = "gameboy_framed"
-            bordered_image.save()
+
+            # Create proper file path for bordered image
+            bordered_filename = f"gameboy_framed_{timestamp_ms}.png"
+            bordered_filepath = os.path.join(self.config.capture_directory, bordered_filename)
+            bordered_image.save(bordered_filepath)
         except GBCameraError as e:
             logger.warning(f"Could not create bordered version: {e}")
             bordered_image = base_image.copy()

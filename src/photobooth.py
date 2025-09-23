@@ -11,7 +11,7 @@ from enum import Enum, auto
 from pathlib import Path
 from PIL import ImageFont, ImageDraw, Image
 from typing import Optional, List, Tuple
-from common import SystemStatus, PhotoboothImage, ImageManager
+from common import SystemStatus, PhotoboothImage, ImageManager, ImageMetadata
 from ds40 import DS40
 from gbcamera import GBCamera, GBCameraConfig, GBCameraError
 from gbprinter import GBPrinter
@@ -29,7 +29,6 @@ class PhotoboothState(Enum):
     IDLE = auto()
     COUNTDOWN = auto()
     CAPTURING = auto()
-    PROCESSING = auto()
     PRINTING = auto()
     ERROR = auto()
 
@@ -165,6 +164,7 @@ class CameraManager:
                 gb_regular, gb_bordered = self.gb_camera.capture(session_id)
                 nikon_image = self.nikon.capture_image(session_id)
                 gb_ai_regular, gb_ai_bordered = self._ai_upscale_gb_photo(gb_regular)
+
                 # Crop Nikon image to match GB aspect ratio (160/144 = 1.111...)
                 nikon_cropped = self._crop_to_gb_aspect_ratio(nikon_image)
                 return gb_bordered, gb_ai_bordered, nikon_cropped
@@ -187,14 +187,40 @@ class CameraManager:
         except Exception as e:
             logger.error(f"AI border image load error: {e}")
             return None
+
         ai_upscaled = cv2.resize(photo.data.copy(), None, fx=6, fy=6, interpolation=cv2.INTER_NEAREST)
-        border_image[96:96+ai_upscaled.shape[0], 96:96+ai_upscaled.shape[1]] = ai_upscaled
-        timestamp = str(int(time.time()*1000))
-        ai_upscaled_image = PhotoboothImage(data=ai_upscaled)
-        ai_upscaled_image.save(os.path.join("captures", "gameboy", f"gameboy_ai_{timestamp}.png"))
-        ai_upscaled_image_bordered = PhotoboothImage(data=border_image)
-        ai_upscaled_image_bordered.save(os.path.join("captures", "gameboy", f"gameboy_ai_framed_{timestamp}.png"))
+        border_image[96:96 + ai_upscaled.shape[0], 96:96 + ai_upscaled.shape[1]] = ai_upscaled
+
+        # Create PhotoboothImage objects with copied metadata to preserve timestamp
+        ai_upscaled_metadata = ImageMetadata(
+            timestamp=photo.metadata.timestamp,
+            camera_type="gameboy_ai",
+            session_id=photo.metadata.session_id,
+            image_index=photo.metadata.image_index,
+            processing_applied=photo.metadata.processing_applied.copy() + ["ai_upscale"]
+        )
+
+        ai_bordered_metadata = ImageMetadata(
+            timestamp=photo.metadata.timestamp,
+            camera_type="gameboy_ai_framed",
+            session_id=photo.metadata.session_id,
+            image_index=photo.metadata.image_index,
+            processing_applied=photo.metadata.processing_applied.copy() + ["ai_upscale", "border"]
+        )
+
+        ai_upscaled_image = PhotoboothImage(data=ai_upscaled, metadata=ai_upscaled_metadata)
+        ai_upscaled_image_bordered = PhotoboothImage(data=border_image, metadata=ai_bordered_metadata)
+
+        # Save AI upscaled images with proper paths
+        timestamp_ms = int(photo.metadata.timestamp * 1000)
+        ai_filepath = os.path.join("captures", "gameboy", f"gameboy_ai_{timestamp_ms}.png")
+        ai_framed_filepath = os.path.join("captures", "gameboy", f"gameboy_ai_framed_{timestamp_ms}.png")
+
+        ai_upscaled_image.save(ai_filepath)
+        ai_upscaled_image_bordered.save(ai_framed_filepath)
+
         return ai_upscaled_image, ai_upscaled_image_bordered
+
 
     def _crop_to_gb_aspect_ratio(self, image: PhotoboothImage) -> PhotoboothImage:
         """
@@ -402,17 +428,16 @@ class Photobooth:
             if self.state == PhotoboothState.COUNTDOWN:
                 elapsed = current_time - self.countdown_start
                 if elapsed >= self.config.countdown_duration:
+                    self.state = PhotoboothState.CAPTURING
                     self._capture_photo()
 
             elif self.state == PhotoboothState.CAPTURING:
-                # Handle an ongoing capture process
+                # Handle an ongoing capture process while in the processing state
                 if hasattr(self, '_capture_future') and self._capture_future.done():
                     self._handle_capture_result()
 
     def _capture_photo(self):
         """Initiate photo capture"""
-        self.state = PhotoboothState.CAPTURING
-
         # Submit capture task to persistent executor (non-blocking)
         session_id = self.current_photo_set.session_id if self.current_photo_set else None
         self._capture_future = self.executor.submit(self.camera_manager.capture_photos, session_id)
@@ -458,23 +483,28 @@ class Photobooth:
     def _render_display(self):
         """Render the current display"""
         frame = self.camera_manager.get_preview_frame()
-        if frame is not None:
+        if frame is None:
+            width, height = (1280, 720)
+            display_frame = np.zeros((height, width, 3), dtype=np.uint8)
+        else:
             display_frame = cv2.resize(frame, (0, 0),
                                        fx=self.config.display_scale,
                                        fy=self.config.display_scale)
+            frame_pil = Image.fromarray(display_frame)
+            draw = ImageDraw.Draw(frame_pil)
             if self.state == PhotoboothState.COUNTDOWN:
                 remaining = self.config.countdown_duration - (time.time() - self.countdown_start)
-                if remaining > 0:
-                    countdown_text = str(max(1, int(remaining)))
-                    frame_pil = Image.fromarray(display_frame)
-                    draw = ImageDraw.Draw(frame_pil)
+                if remaining > 1.0:  # A small buffer to ensure "SMILE!" is shown
+                    countdown_text = str(max(1, int(np.ceil(remaining))))
                     draw.text((50, 50), countdown_text, (0, 255, 0), font=overlay_font)
-                    display_frame = np.array(frame_pil)
+                else:
+                    # Show "SMILE!" just before capture
+                    draw.text((50, 50), "SMILE!", (0, 255, 0), font=overlay_font)
+
             elif self.state == PhotoboothState.CAPTURING:
-                frame_pil = Image.fromarray(display_frame)
-                draw = ImageDraw.Draw(frame_pil)
-                draw.text((50, 50), "SMILE!", (0, 255, 0), font=overlay_font)
-                display_frame = np.array(frame_pil)
+                draw.text((50, 50), "WAIT...", (0, 255, 0), font=overlay_font)
+
+            display_frame = np.array(frame_pil)
             cv2.imshow(self.config.window_name, display_frame)
 
     def _handle_keyboard_input(self):
@@ -586,8 +616,8 @@ if __name__ == "__main__":
         delay_between_photos=4.0,
         countdown_duration=4.0,
         gb_camera_config=GBCameraConfig(
-            crop_start_x=100,
-            crop_start_y=100
+            crop_start_x=511,
+            crop_start_y=147
         ),
         nikon_config=NikonConfig(
             iso=800,
