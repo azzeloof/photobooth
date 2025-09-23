@@ -17,6 +17,8 @@ from gbcamera import GBCamera, GBCameraConfig, GBCameraError
 from gbprinter import GBPrinter
 from hardware import Hardware, HardwareConfig, HardwareError
 from nikon import NikonCamera, NikonConfig, NikonError
+# NEW: Import the DisplayManager
+from display import DisplayManager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -29,6 +31,7 @@ class PhotoboothState(Enum):
     IDLE = auto()
     COUNTDOWN = auto()
     CAPTURING = auto()
+    PROCESSING = auto()  # NEW STATE
     PRINTING = auto()
     ERROR = auto()
 
@@ -61,9 +64,28 @@ class PhotoboothConfig:
             self.hardware_config = HardwareConfig()
 
 
+# --- NEW AND UPDATED EVENT CLASSES ---
 @dataclass
-class CaptureEvent:
-    """Event for capture operations"""
+class StartSessionEvent:
+    """Event to start a new photo session."""
+    pass
+
+
+@dataclass
+class CapturePhotoEvent:
+    """Event to trigger a single photo capture."""
+    pass
+
+
+@dataclass
+class CaptureCompleteEvent:
+    """Event fired when a photo capture is successfully completed."""
+    result: Tuple[PhotoboothImage, PhotoboothImage, PhotoboothImage]
+
+
+@dataclass
+class NextPhotoEvent:
+    """Event to start the countdown for the next photo in a session."""
     pass
 
 
@@ -71,12 +93,6 @@ class CaptureEvent:
 class PrintEvent:
     """Event for print operations"""
     photos: List[Tuple[PhotoboothImage, PhotoboothImage, PhotoboothImage]]
-
-
-@dataclass
-class CountdownEvent:
-    """Event for countdown operations"""
-    remaining_time: float
 
 
 @dataclass
@@ -91,11 +107,13 @@ class PhotoSet:
         self.created_at = time.time()
         self.max_photos = max_photos
         self.delay_between_photos = delay_between_photos
-        self.captures: List[Tuple[PhotoboothImage, PhotoboothImage,PhotoboothImage]] = []  # (gb_image, gb_ai_image, nikon_image) pairs
+        self.captures: List[
+            Tuple[PhotoboothImage, PhotoboothImage, PhotoboothImage]] = []  # (gb_image, gb_ai_image, nikon_image) pairs
         self.current_capture = 0
         self.session_id = f"session_{int(time.time())}"
 
-    def add_capture(self, gb_image: PhotoboothImage, gb_ai_image: PhotoboothImage,nikon_image: PhotoboothImage) -> bool:
+    def add_capture(self, gb_image: PhotoboothImage, gb_ai_image: PhotoboothImage,
+                    nikon_image: PhotoboothImage) -> bool:
         """Add a capture to the set. Returns True if successful, False if the set is full."""
         if len(self.captures) < self.max_photos:
             self.captures.append((gb_image, gb_ai_image, nikon_image))
@@ -163,11 +181,10 @@ class CameraManager:
                 # Capture from both cameras as PhotoboothImages
                 gb_regular, gb_bordered = self.gb_camera.capture(session_id)
                 nikon_image = self.nikon.capture_image(session_id)
-                gb_ai_regular, gb_ai_bordered = self._ai_upscale_gb_photo(gb_regular)
 
                 # Crop Nikon image to match GB aspect ratio (160/144 = 1.111...)
                 nikon_cropped = self._crop_to_gb_aspect_ratio(nikon_image)
-                return gb_bordered, gb_ai_bordered, nikon_cropped
+                return gb_regular, gb_bordered, nikon_cropped
 
             except (GBCameraError, NikonError) as e:
                 logger.error(f"Capture failed: {e}")
@@ -179,48 +196,6 @@ class CameraManager:
             preview_image = self.gb_camera.get_current_image(color=True)
             return preview_image.data if preview_image else None
         return None
-
-    @staticmethod
-    def _ai_upscale_gb_photo(photo: PhotoboothImage):
-        try:
-            border_image = cv2.imread("gb_ai_border.png")
-        except Exception as e:
-            logger.error(f"AI border image load error: {e}")
-            return None
-
-        ai_upscaled = cv2.resize(photo.data.copy(), None, fx=6, fy=6, interpolation=cv2.INTER_NEAREST)
-        border_image[96:96 + ai_upscaled.shape[0], 96:96 + ai_upscaled.shape[1]] = ai_upscaled
-
-        # Create PhotoboothImage objects with copied metadata to preserve timestamp
-        ai_upscaled_metadata = ImageMetadata(
-            timestamp=photo.metadata.timestamp,
-            camera_type="gameboy_ai",
-            session_id=photo.metadata.session_id,
-            image_index=photo.metadata.image_index,
-            processing_applied=photo.metadata.processing_applied.copy() + ["ai_upscale"]
-        )
-
-        ai_bordered_metadata = ImageMetadata(
-            timestamp=photo.metadata.timestamp,
-            camera_type="gameboy_ai_framed",
-            session_id=photo.metadata.session_id,
-            image_index=photo.metadata.image_index,
-            processing_applied=photo.metadata.processing_applied.copy() + ["ai_upscale", "border"]
-        )
-
-        ai_upscaled_image = PhotoboothImage(data=ai_upscaled, metadata=ai_upscaled_metadata)
-        ai_upscaled_image_bordered = PhotoboothImage(data=border_image, metadata=ai_bordered_metadata)
-
-        # Save AI upscaled images with proper paths
-        timestamp_ms = int(photo.metadata.timestamp * 1000)
-        ai_filepath = os.path.join("captures", "gameboy", f"gameboy_ai_{timestamp_ms}.png")
-        ai_framed_filepath = os.path.join("captures", "gameboy", f"gameboy_ai_framed_{timestamp_ms}.png")
-
-        ai_upscaled_image.save(ai_filepath)
-        ai_upscaled_image_bordered.save(ai_framed_filepath)
-
-        return ai_upscaled_image, ai_upscaled_image_bordered
-
 
     def _crop_to_gb_aspect_ratio(self, image: PhotoboothImage) -> PhotoboothImage:
         """
@@ -253,7 +228,8 @@ class CameraManager:
             y_offset = (height - new_height) // 2
             cropped = image.crop(0, y_offset, width, new_height)
 
-        logger.info(f"Cropped Nikon image from {width}x{height} to {cropped.shape[1]}x{cropped.shape[0]} for GB aspect ratio")
+        logger.info(
+            f"Cropped Nikon image from {width}x{height} to {cropped.shape[1]}x{cropped.shape[0]} for GB aspect ratio")
         return cropped
 
     def shutdown(self):
@@ -293,20 +269,26 @@ class Photobooth:
         self.printer = DS40()
         self.gb_printer = GBPrinter()
         self.hardware: Optional[Hardware] = None
+        # NEW: DisplayManager instance
+        self.display_manager = DisplayManager(
+            self.config.window_name,
+            self.config.fullscreen,
+            self.config.display_scale,
+            overlay_font,
+            PhotoboothState
+        )
 
         # Threading
         self.running = False
         self.state_lock = threading.Lock()
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
-        # Timing
-        self.countdown_start = 0
-        self.next_capture_time = 0
+        # Timing (simplified)
+        self.countdown_end_time = 0
 
         # Initialize components
         self._initialize_hardware()
         self._initialize_cameras()
-        self._setup_display()
 
     def _initialize_hardware(self):
         """Initialize hardware components"""
@@ -324,7 +306,6 @@ class Photobooth:
             logger.warning(f"Unexpected hardware error: {e}")
             self.hardware = None
 
-
     def _initialize_cameras(self):
         """Initialize camera system"""
         if self.camera_manager.initialize():
@@ -333,15 +314,9 @@ class Photobooth:
             self.system_status.add_error("Camera initialization failed")
             self._transition_to_error("Camera initialization failed")
 
-    def _setup_display(self):
-        """Setup OpenCV display"""
-        cv2.namedWindow(self.config.window_name, cv2.WND_PROP_FULLSCREEN)
-        if self.config.fullscreen:
-            cv2.setWindowProperty(self.config.window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-
     def _on_capture_button(self):
-        """Hardware button callback"""
-        self.event_queue.put(CaptureEvent())
+        """Hardware button callback - now posts a StartSessionEvent"""
+        self.event_queue.put(StartSessionEvent())
 
     def _transition_to_error(self, message: str):
         """Transition to error state"""
@@ -350,21 +325,17 @@ class Photobooth:
             logger.error(f"Error state: {message}")
 
     def run(self):
-        """Main application loop"""
+        """Main application loop - simplified"""
         self.running = True
 
-        # Start the hardware polling thread if available
         if self.hardware:
             self.hardware.start()
 
         try:
             while self.running:
                 self._process_events()
-                self._update_state()
                 self._render_display()
                 self._handle_keyboard_input()
-
-                # Small delay to prevent busy waiting
                 time.sleep(0.016)  # ~60 FPS
 
         except KeyboardInterrupt:
@@ -375,25 +346,145 @@ class Photobooth:
     def _process_events(self):
         """Process events from the queue"""
         try:
-            while True:
-                event = self.event_queue.get_nowait()
-                self._handle_event(event)
+            event = self.event_queue.get_nowait()
+            self._handle_event(event)
         except queue.Empty:
             pass
 
     def _handle_event(self, event):
-        """Handle individual events based on the current state"""
+        """
+        REFACTORED: Central hub for all state transitions and logic.
+        """
         with self.state_lock:
-            if isinstance(event, CaptureEvent):
-                if self.state == PhotoboothState.IDLE:
-                    self._start_capture_session()
+            if isinstance(event, StartSessionEvent) and self.state == PhotoboothState.IDLE:
+                self._start_capture_session()
 
-            elif isinstance(event, ErrorEvent):
-                self._transition_to_error(event.message)
+            elif isinstance(event, CapturePhotoEvent) and self.state == PhotoboothState.COUNTDOWN:
+                self._capture_photo()
+
+            elif isinstance(event, CaptureCompleteEvent):
+                self._handle_capture_result(event.result)
+
+            elif isinstance(event, NextPhotoEvent) and self.state == PhotoboothState.PROCESSING:
+                self.state = PhotoboothState.COUNTDOWN
+                self._start_countdown_timer()
 
             elif isinstance(event, PrintEvent):
                 self._handle_print_event(event)
 
+            elif isinstance(event, ErrorEvent):
+                self._transition_to_error(event.message)
+
+    def _start_capture_session(self):
+        """Start a new multi-photo capture session"""
+        self.current_photo_set = PhotoSet(
+            self.config.photos_per_session,
+            self.config.delay_between_photos
+        )
+        self.state = PhotoboothState.COUNTDOWN
+        logger.info(f"Starting capture session: {self.config.photos_per_session} photos")
+
+        if self.hardware:
+            self.hardware.blink_button_led(0, 0.5)
+
+        self._start_countdown_timer()
+
+    def _start_countdown_timer(self):
+        """Starts a non-blocking timer to trigger the capture."""
+        self.countdown_end_time = time.time() + self.config.countdown_duration
+        # Use a timer to put the capture event on the queue, making it non-blocking
+        threading.Timer(self.config.countdown_duration,
+                        lambda: self.event_queue.put(CapturePhotoEvent())).start()
+
+    def _capture_photo(self):
+        """Initiate photo capture and transition to PROCESSING state."""
+        self.state = PhotoboothState.CAPTURING
+        session_id = self.current_photo_set.session_id if self.current_photo_set else None
+
+        # Submit the capture task and add a callback to handle the result
+        future = self.executor.submit(self.camera_manager.capture_photos, session_id)
+        future.add_done_callback(self._on_capture_future_done)
+        self.state = PhotoboothState.PROCESSING  # Show "PLEASE WAIT..." immediately
+
+    def _on_capture_future_done(self, future):
+        """Callback executed when capture task finishes. Puts result on event queue."""
+        try:
+            result = future.result()
+            if result:
+                self.event_queue.put(CaptureCompleteEvent(result=result))
+            else:
+                self.event_queue.put(ErrorEvent("Photo capture failed"))
+        except Exception as e:
+            self.event_queue.put(ErrorEvent(f"Capture error: {e}"))
+
+    def _handle_capture_result(self, result):
+        """Handle a completed photo capture"""
+        if self.current_photo_set:
+            gb_regular, gb_bordered, nikon_cropped = result
+            _, gb_ai_bordered = self._create_ai_upscaled_version(gb_regular)
+
+            self.current_photo_set.add_capture(gb_bordered, gb_ai_bordered, nikon_cropped)
+            logger.info(
+                f"Captured photo {self.current_photo_set.current_capture}/{self.config.photos_per_session}")
+
+            if self.hardware:
+                self.hardware.blink_button_led(0, 0.2)
+
+            if self.current_photo_set.is_complete():
+                self._start_printing()
+            else:
+                # Start a timer for the delay between photos
+                threading.Timer(self.config.delay_between_photos,
+                                lambda: self.event_queue.put(NextPhotoEvent())).start()
+
+    def _start_printing(self):
+        """Start the printing process"""
+        self.state = PhotoboothState.PRINTING
+        if self.current_photo_set:
+            self.event_queue.put(PrintEvent(self.current_photo_set.captures))
+            self.current_photo_set = None
+            self.state = PhotoboothState.IDLE
+
+    @staticmethod
+    def _create_ai_upscaled_version(photo: PhotoboothImage):
+        try:
+            border_image = cv2.imread("gb_ai_border.png")
+        except Exception as e:
+            logger.error(f"AI border image load error: {e}")
+            return None, None
+
+        ai_upscaled = cv2.resize(photo.data.copy(), None, fx=6, fy=6, interpolation=cv2.INTER_NEAREST)
+        border_image[96:96 + ai_upscaled.shape[0], 96:96 + ai_upscaled.shape[1]] = ai_upscaled
+
+        # Create PhotoboothImage objects with copied metadata to preserve timestamp
+        ai_upscaled_metadata = ImageMetadata(
+            timestamp=photo.metadata.timestamp,
+            camera_type="gameboy_ai",
+            session_id=photo.metadata.session_id,
+            image_index=photo.metadata.image_index,
+            processing_applied=photo.metadata.processing_applied.copy() + ["ai_upscale"]
+        )
+
+        ai_bordered_metadata = ImageMetadata(
+            timestamp=photo.metadata.timestamp,
+            camera_type="gameboy_ai_framed",
+            session_id=photo.metadata.session_id,
+            image_index=photo.metadata.image_index,
+            processing_applied=photo.metadata.processing_applied.copy() + ["ai_upscale", "border"]
+        )
+
+        ai_upscaled_image = PhotoboothImage(data=ai_upscaled, metadata=ai_upscaled_metadata)
+        ai_upscaled_image_bordered = PhotoboothImage(data=border_image, metadata=ai_bordered_metadata)
+
+        # Save AI upscaled images with proper paths
+        timestamp_ms = int(photo.metadata.timestamp * 1000)
+        ai_filepath = os.path.join("captures", "gameboy", f"gameboy_ai_{timestamp_ms}.png")
+        ai_framed_filepath = os.path.join("captures", "gameboy", f"gameboy_ai_framed_{timestamp_ms}.png")
+
+        ai_upscaled_image.save(ai_filepath)
+        ai_upscaled_image_bordered.save(ai_framed_filepath)
+
+        return ai_upscaled_image, ai_upscaled_image_bordered
 
     def _handle_print_event(self, event: PrintEvent):
         """Handle print events"""
@@ -406,106 +497,16 @@ class Photobooth:
         except Exception as e:
             logger.error(f"Printing failed: {e}")
 
-    def _start_capture_session(self):
-        """Start a new multi-photo capture session"""
-        self.current_photo_set = PhotoSet(
-            self.config.photos_per_session,
-            self.config.delay_between_photos
-        )
-        self.countdown_start = time.time()
-        self.state = PhotoboothState.COUNTDOWN
-        logger.info(f"Starting capture session: {self.config.photos_per_session} photos")
-
-        # Visual feedback
-        if self.hardware:
-            self.hardware.blink_button_led(0, 0.5)
-
-    def _update_state(self):
-        """Update state machine"""
-        current_time = time.time()
-
-        with self.state_lock:
-            if self.state == PhotoboothState.COUNTDOWN:
-                elapsed = current_time - self.countdown_start
-                if elapsed >= self.config.countdown_duration:
-                    self.state = PhotoboothState.CAPTURING
-                    self._capture_photo()
-
-            elif self.state == PhotoboothState.CAPTURING:
-                # Handle an ongoing capture process while in the processing state
-                if hasattr(self, '_capture_future') and self._capture_future.done():
-                    self._handle_capture_result()
-
-    def _capture_photo(self):
-        """Initiate photo capture"""
-        # Submit capture task to persistent executor (non-blocking)
-        session_id = self.current_photo_set.session_id if self.current_photo_set else None
-        self._capture_future = self.executor.submit(self.camera_manager.capture_photos, session_id)
-
-    def _handle_capture_result(self):
-        """Handle a completed photo capture"""
-        try:
-            result = self._capture_future.result()
-            if result and self.current_photo_set:
-                gb_file, gb_ai_file, nikon_file = result
-                self.current_photo_set.add_capture(gb_file, gb_ai_file, nikon_file)
-                logger.info(
-                    f"Captured photo {self.current_photo_set.current_capture}/{self.config.photos_per_session}")
-
-                # Visual feedback
-                if self.hardware:
-                    self.hardware.blink_button_led(0, 0.2)
-
-                if self.current_photo_set.is_complete():
-                    self._start_printing()
-                else:
-                    self._prepare_next_capture()
-            else:
-                self.event_queue.put(ErrorEvent("Photo capture failed"))
-        except Exception as e:
-            self.event_queue.put(ErrorEvent(f"Capture error: {e}"))
-
-    def _prepare_next_capture(self):
-        """Prepare for the next photo in the session"""
-        self.next_capture_time = time.time() + self.config.delay_between_photos
-        self.countdown_start = self.next_capture_time - self.config.countdown_duration
-        self.state = PhotoboothState.COUNTDOWN
-
-    def _start_printing(self):
-        """Start the printing process"""
-        self.state = PhotoboothState.PRINTING
-        if self.current_photo_set:
-            self.event_queue.put(PrintEvent(self.current_photo_set.captures))
-            # Reset for the next session
-            self.current_photo_set = None
-            self.state = PhotoboothState.IDLE
-
     def _render_display(self):
-        """Render the current display"""
+        """REFACTORED: Delegates all rendering to the DisplayManager."""
         frame = self.camera_manager.get_preview_frame()
-        if frame is None:
-            width, height = (1280, 720)
-            display_frame = np.zeros((height, width, 3), dtype=np.uint8)
-        else:
-            display_frame = cv2.resize(frame, (0, 0),
-                                       fx=self.config.display_scale,
-                                       fy=self.config.display_scale)
-            frame_pil = Image.fromarray(display_frame)
-            draw = ImageDraw.Draw(frame_pil)
-            if self.state == PhotoboothState.COUNTDOWN:
-                remaining = self.config.countdown_duration - (time.time() - self.countdown_start)
-                if remaining > 1.0:  # A small buffer to ensure "SMILE!" is shown
-                    countdown_text = str(max(1, int(np.ceil(remaining))))
-                    draw.text((50, 50), countdown_text, (0, 255, 0), font=overlay_font)
-                else:
-                    # Show "SMILE!" just before capture
-                    draw.text((50, 50), "SMILE!", (0, 255, 0), font=overlay_font)
 
-            elif self.state == PhotoboothState.CAPTURING:
-                draw.text((50, 50), "WAIT...", (0, 255, 0), font=overlay_font)
+        # Calculate remaining time for countdown if applicable
+        countdown_remaining = 0
+        if self.state == PhotoboothState.COUNTDOWN:
+            countdown_remaining = max(0, self.countdown_end_time - time.time())
 
-            display_frame = np.array(frame_pil)
-            cv2.imshow(self.config.window_name, display_frame)
+        self.display_manager.render(frame, self.state, countdown_remaining)
 
     def _handle_keyboard_input(self):
         """Handle keyboard input"""
@@ -513,7 +514,7 @@ class Photobooth:
         if key == ord('q'):
             self.running = False
         elif key == ord('c'):
-            self.event_queue.put(CaptureEvent())
+            self.event_queue.put(StartSessionEvent())
         elif key == ord('r') and self.state == PhotoboothState.ERROR:
             # Reset from an error state
             with self.state_lock:
@@ -527,11 +528,11 @@ class Photobooth:
             self.hardware.stop()
 
         self.camera_manager.shutdown()
+        self.display_manager.destroy_windows()
         try:
             self.executor.shutdown(wait=False, cancel_futures=True)
         except Exception as e:
             logger.warning(f"Executor shutdown warning: {e}")
-        cv2.destroyAllWindows()
 
 
 def layout_page(frames: List[Tuple[PhotoboothImage, PhotoboothImage, PhotoboothImage]]) -> Image:
@@ -541,8 +542,8 @@ def layout_page(frames: List[Tuple[PhotoboothImage, PhotoboothImage, PhotoboothI
     :param frames: List[Tuple[gb_image: PhotoboothImage, gb_ai_image: PhotoboothImage, nikon_image: PhotoboothImage]]
     :return: PIL Image with composite layout
     """
-    assert(len(frames) == 3)
-    assert(len(frames[0]) == 3)
+    assert (len(frames) == 3)
+    assert (len(frames[0]) == 3)
     # Page dimensions (in pixels at 300 DPI)
     PAGE_WIDTH = 1800  # 6 inches * 300 DPI
     PAGE_HEIGHT = 2400  # 8 inches * 300 DPI
@@ -627,4 +628,4 @@ if __name__ == "__main__":
 
     photobooth = Photobooth(config)
     photobooth.run()
-    #test_layout()
+    # test_layout()
