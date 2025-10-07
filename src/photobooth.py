@@ -474,9 +474,11 @@ class Photobooth:
         """Handle print events"""
         try:
             filename = os.path.join("captures", "composite", f"session_{int(time.time())}.pdf")
-            page = layout_page(event.photos)
+            pages = layout_page(event.photos)
             Path(filename).parent.mkdir(parents=True, exist_ok=True)
-            page.save(filename, "PDF", resolution=100.0)
+            
+            # Save as multi-page PDF
+            pages[0].save(filename, "PDF", resolution=100.0, save_all=True, append_images=pages[1:])
             self.printer.print(filename)
         except Exception as e:
             logger.error(f"Printing failed: {e}")
@@ -521,53 +523,100 @@ class Photobooth:
 
 def layout_page(frames: List[Tuple[PhotoboothImage, PhotoboothImage, PhotoboothImage]]):
     """
-    Lay the full page out to be printed. Pages are printed onto perforated 6"x8" sheets,
-    which tear into three 2"x8" sheets each.
+    Lay the full page out to be printed. Creates two 4"x6" pages with two columns per page,
+    handling four photo sessions total.
     :param frames: List[Tuple[gb_image: PhotoboothImage, gb_ai_image: PhotoboothImage, nikon_image: PhotoboothImage]]
-    :return: PIL Image with composite layout
+                   Expected to have 4 elements
+    :return: List of PIL Images, one for each page
     """
     ######### Parameters #########
-    page_width = 1800  # 6 inches * 300 DPI
-    page_height = 2400  # 8 inches * 300 DPI
-    margin = 50  # pixels
-    column_width = (page_width - (4 * margin)) // len(frames)  # Width per column
-    row_height = (page_height - (4 * margin)) // 4  # Height per image type row
+    page_width = 1200  # 4 inches * 300 DPI
+    page_height = 1800  # 6 inches * 300 DPI
+    
+    # Simple margin control
+    margin_x = 50  # Side margins
+    margin_y_top = 50  # Top margin
+    margin_y_bottom = 350  # Bottom margin (for text space)
+    
+    # Image aspect ratio (GB camera: 160/144)
+    image_aspect_ratio = 160.0 / 144.0  # 1.111...
+    
+    # Calculate available space
+    available_width = page_width - (2 * margin_x)
+    available_height = page_height - margin_y_top - margin_y_bottom
+    
+    # Column layout
+    column_spacing = 50  # Space between columns
+    max_column_width = (available_width - column_spacing) // 2
+    
+    # Calculate image dimensions based on both constraints
+    min_spacing_between_images = 20  # Minimum spacing between images
+    max_total_image_height = available_height - (2 * min_spacing_between_images)
+    max_image_height_from_y = max_total_image_height // 3
+    
+    # Find the most restrictive constraint
+    max_image_width_from_x = max_column_width
+    max_image_height_from_x = int(max_image_width_from_x / image_aspect_ratio)
+    
+    # Use the most restrictive dimension
+    if max_image_height_from_x <= max_image_height_from_y:
+        # X dimension is more restrictive
+        image_width = max_image_width_from_x
+        image_height = max_image_height_from_x
+    else:
+        # Y dimension is more restrictive
+        image_height = max_image_height_from_y
+        image_width = int(image_height * image_aspect_ratio)
+    
+    # Calculate actual spacing between images to center them vertically
+    total_images_height = 3 * image_height
+    remaining_height = available_height - total_images_height
+    spacing_between_images = remaining_height / 2  # 2 gaps between 3 images
+    
     ##############################
-    assert (len(frames) == 3)
+    assert (len(frames) == 4)
     assert (len(frames[0]) == 3)
 
-    # Create the blank white page
-    page = Image.new('RGB', (page_width, page_height), 'white')
-    ImageDraw.Draw(page)
+    logger.info(f"Laying out two pages with {len(frames)} frames")
+    logger.info(f"Image size: {image_width}x{image_height}, Spacing: {spacing_between_images}")
 
-    logger.info(f"Laying out page with {len(frames)} frames")
+    # Create two separate pages
+    page1 = Image.new('RGB', (page_width, page_height), 'white')
+    page2 = Image.new('RGB', (page_width, page_height), 'white')
+    pages = [page1, page2]
 
-    # Calculate column starting positions (one per session)
-    col_x = [margin + session * (column_width + margin) for session in range(len(frames))]
+    # Calculate column starting positions (centered in their available space)
+    column_area_width = (available_width - column_spacing) // 2
+    col_x = [
+        margin_x + (column_area_width - image_width) // 2,  # Center first column
+        margin_x + column_area_width + column_spacing + (column_area_width - image_width) // 2  # Center second column
+    ]
 
-    # Place images by image type (row) and session (column)
-    for session, (gb_image, gb_ai_image, nikon_image) in enumerate(frames):
-        images_by_type = [gb_image, gb_ai_image, nikon_image]
+    # Process frames in pairs: first two frames go on page 1, and the next two on page 2
+    for page_idx, page in enumerate(pages):
+        frame_start = page_idx * 2
+        frame_end = frame_start + 2
+        page_frames = frames[frame_start:frame_end]
+        
+        for col_idx, (gb_image, gb_ai_image, nikon_image) in enumerate(page_frames):
+            images_by_type = [gb_image, gb_ai_image, nikon_image]
 
-        for image_type, image in enumerate(images_by_type):
-            # Calculate position
-            x = col_x[session]
-            y = margin + image_type * (row_height + margin)
+            for image_type, image in enumerate(images_by_type):
+                # Calculate Y position with automatic spacing
+                x = col_x[col_idx]
+                y = margin_y_top + image_type * (image_height + spacing_between_images)
 
-            try:
-                img = Image.open(image.file_path)
-                aspect = img.height / float(img.width)
-                img = img.resize((column_width, int(column_width * aspect)))
-                # Center image in its cell
-                x_offset = x + (column_width - img.width) // 2
-                y_offset = y + (row_height - img.height) // 2
-
-                # Paste image
-                page.paste(img, (x_offset, y_offset))
-            except Exception as e:
-                logger.error(f"Error placing image {image}: {e}")
-
-    return page
+                try:
+                    img = Image.open(image.file_path)
+                    # Resize to calculated dimensions
+                    img = img.resize((image_width, image_height))
+                    
+                    # Paste image at calculated position
+                    page.paste(img, (x, int(y)))
+                except Exception as e:
+                    logger.error(f"Error placing image {image}: {e}")
+                    
+    return pages
 
 
 def test_layout():
@@ -587,18 +636,23 @@ def test_layout():
             PhotoboothImage.from_file("captures/gameboy/gb3.png"),
             PhotoboothImage.from_file("captures/gameboy/gb_ai3.png"),
             cm._crop_to_gb_aspect_ratio(PhotoboothImage.from_file("captures/nikon/nikon3.jpg"))
+        ),
+        (
+            PhotoboothImage.from_file("captures/gameboy/gb1.png"),
+            PhotoboothImage.from_file("captures/gameboy/gb_ai1.png"),
+            cm._crop_to_gb_aspect_ratio(PhotoboothImage.from_file("captures/nikon/nikon1.jpg"))
         )
     ]
-    layout = layout_page(frames)
-    layout.save("captures/test.pdf", "PDF", resolution=100.0)
+    pages = layout_page(frames)
+    pages[0].save("captures/test.pdf", "PDF", resolution=100.0, save_all=True, append_images=pages[1:])
 
 
 if __name__ == "__main__":
     # Example with custom configuration
     config = PhotoboothConfig(
-        photos_per_session=3,
-        delay_between_photos=4.0,
-        countdown_duration=4.0,
+        photos_per_session=4,
+        delay_between_photos=5.0,
+        countdown_duration=5.0,
         gb_camera_config=GBCameraConfig(
             crop_start_x=511,
             crop_start_y=147
@@ -609,6 +663,6 @@ if __name__ == "__main__":
         )
     )
 
-    photobooth = Photobooth(config)
-    photobooth.run()
-    # test_layout()
+    #photobooth = Photobooth(config)
+    #photobooth.run()
+    test_layout()
