@@ -248,20 +248,28 @@ class CameraManager:
         height, width = image.shape[:2]
         current_aspect_ratio = width / height
 
-        if abs(current_aspect_ratio - target_aspect_ratio) < 0.001:
-            # Already the correct aspect ratio
-            return image
+        new_width = 4000
 
-        if current_aspect_ratio > target_aspect_ratio:
-            # Image is too wide, crop width
-            new_width = int(height * target_aspect_ratio)
-            x_offset = (width - new_width) // 2
-            cropped = image.crop(x_offset, 0, new_width, height)
-        else:
-            # Image is too tall, crop height
-            new_height = int(width / target_aspect_ratio)
-            y_offset = (height - new_height) // 2
-            cropped = image.crop(0, y_offset, width, new_height)
+        try:
+            cropped = image.crop(2200, 1200, new_width, int(new_width/target_aspect_ratio))
+        except Exception as e:
+            logger.log(f"Error cropping: {e}")
+            return image.copy()
+
+        #if abs(current_aspect_ratio - target_aspect_ratio) < 0.001:
+        #    # Already the correct aspect ratio
+        #    return image
+
+        #if current_aspect_ratio > target_aspect_ratio:
+        #    # Image is too wide, crop width
+        #    new_width = int(height * target_aspect_ratio)
+        #    x_offset = (width - new_width) // 2
+        #    cropped = image.crop(x_offset, 0, new_width, height)
+        #else:
+        #    # Image is too tall, crop height
+        #    new_height = int(width / target_aspect_ratio)
+        #    y_offset = (height - new_height) // 2
+        #    cropped = image.crop(0, y_offset, width, new_height)
 
         logger.info(
             f"Cropped Nikon image from {width}x{height} to {cropped.shape[1]}x{cropped.shape[0]} for GB aspect ratio")
@@ -863,7 +871,7 @@ if __name__ == "__main__":
         )
     )
     replicate_ai_token = secret.REPLICATE_API_TOKEN
-    #photobooth = Photobooth(config, replicate_ai_token)
-    #hotobooth.run()
-    test_layout()
+    photobooth = Photobooth(config, replicate_ai_token)
+    photobooth.run()
+    #test_layout()
     #sample_capture(True, replicate_ai_token)

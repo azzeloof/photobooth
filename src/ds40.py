@@ -16,7 +16,7 @@ class DS40Error(PhotoboothError):
 
 
 class DS40:
-    def __init__(self, printer_name="DS40"):
+    def __init__(self, printer_name="DP-QW410"):
         self.printer_name = printer_name
         self.print_command = ["lp"]
         self.print_command.extend(["-d", printer_name])

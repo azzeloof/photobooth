@@ -39,7 +39,8 @@ class DisplayManager:
             x1 = int(width/2+64*self.display_scale)
             y0 = int(height/2-56*self.display_scale+y_offset)
             y1 = int(height/2+56*self.display_scale+y_offset)
-            display_frame[y0:y1, x0:x1] = cv2.resize(frame, (0, 0), fx=self.display_scale, fy=self.display_scale, interpolation=cv2.INTER_NEAREST)
+            frame_flip = cv2.flip(frame, 1)
+            display_frame[y0:y1, x0:x1] = cv2.resize(frame_flip, (0, 0), fx=self.display_scale, fy=self.display_scale, interpolation=cv2.INTER_NEAREST)
 
         frame_pil = Image.fromarray(display_frame)
         draw = ImageDraw.Draw(frame_pil)

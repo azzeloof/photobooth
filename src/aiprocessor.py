@@ -48,7 +48,8 @@ class AIProcessor:
                            prompt: str = "high quality colorized photograph, natural colors, detailed",
                            negative_prompt: str = "blurry, low quality",
                            num_inference_steps: int = 20,
-                           cfg_scale: float = 7.5) -> PhotoboothImage:
+                           cfg_scale: float = 7.5,
+                           timeout: int = 30) -> PhotoboothImage:
         """
         Process a single image through the AI upscaling API (synchronous version)
 
@@ -92,9 +93,22 @@ class AIProcessor:
                     }
                 )
 
-            # Wait for prediction to complete
+            # Wait for the prediction to complete
             logger.info("Waiting for AI prediction to complete...")
-            prediction.wait()
+            #prediction.wait(timeout=timeout)
+            start_time = time.time()
+            prediction.reload()
+            while prediction.status not in ['succeeded', 'failed', 'canceled']:
+                if time.time() - start_time > timeout:
+                    logger.error(f"AI prediction timed out after {timeout} seconds for image {image.file_path}")
+                    try:
+                        prediction.cancel()
+                        logger.info("Cancelled the timed-out Replicate prediction")
+                    except Exception as e:
+                        logger.warning(f"Could not cancel prediction: {e}")
+                    return image.copy()
+                time.sleep(1)
+                prediction.reload()
 
             if prediction.status == "succeeded":
                 output_url = prediction.output
@@ -136,7 +150,9 @@ class AIProcessor:
 
             logger.info(f"AI processing completed: {ai_filepath}")
             return ai_photobooth_image
-
+        #except TimeoutError:
+        #    logger.error(f"AI prediction timed out after {timeout} seconds for image {image.file_path}")
+        #    return image.copy()
         except Exception as e:
             logger.error(f"AI processing failed: {e}")
             # Return original image as fallback
