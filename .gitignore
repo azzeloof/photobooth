@@ -1,3 +1,4 @@
 captures/
 __pycache__/
 .venv/
+src/secret.py

@@ -1,3 +1,4 @@
+import asyncio
 import concurrent.futures
 import cv2
 import logging
@@ -9,7 +10,8 @@ import numpy as np
 from dataclasses import dataclass
 from pathlib import Path
 from PIL import ImageFont, ImageDraw, Image
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict
+import secret
 from common import SystemStatus, PhotoboothImage, ImageManager, ImageMetadata, PhotoboothState
 from ds40 import DS40
 from gbcamera import GBCamera, GBCameraConfig, GBCameraError
@@ -17,6 +19,7 @@ from gbprinter import GBPrinter
 from hardware import Hardware, HardwareConfig, HardwareError
 from nikon import NikonCamera, NikonConfig, NikonError
 from display import DisplayManager
+from aiprocessor import AIProcessor
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -99,6 +102,10 @@ class PhotoSet:
         self.current_capture = 0
         self.session_id = f"session_{int(time.time())}"
 
+        # AI processing tracking
+        self.ai_futures: List[concurrent.futures.Future] = []
+        self.ai_results: Dict[int, PhotoboothImage] = {}  # index -> ai_image
+
     def add_capture(self, gb_image: PhotoboothImage, gb_ai_image: PhotoboothImage,
                     nikon_image: PhotoboothImage) -> bool:
         """Add a capture to the set. Returns True if successful, False if the set is full."""
@@ -107,6 +114,46 @@ class PhotoSet:
             self.current_capture += 1
             return True
         return False
+
+    def start_ai_processing(self, executor: concurrent.futures.ThreadPoolExecutor,
+                            ai_processor, gb_image: PhotoboothImage, image_index: int):
+        """Start AI processing for a capture using the thread pool"""
+        future = executor.submit(ai_processor.process_image_sync, gb_image)
+        future.add_done_callback(lambda f: self._store_ai_result(f, image_index))
+        self.ai_futures.append(future)
+
+    def _store_ai_result(self, future: concurrent.futures.Future, image_index: int):
+        """Store AI processing result"""
+        try:
+            result = future.result()
+            self.ai_results[image_index] = result
+            logger.info(f"AI processing completed for image {image_index}")
+        except Exception as e:
+            logger.error(f"AI processing failed for image {image_index}: {e}")
+
+    def wait_for_ai_completion(self) -> bool:
+        """Wait for all AI processing to complete"""
+        if not self.ai_futures:
+            return True
+
+        try:
+            logger.info(f"Waiting for {len(self.ai_futures)} AI processing tasks to complete...")
+            concurrent.futures.wait(self.ai_futures, timeout=300)  # 5 minute timeout
+            logger.info("All AI processing tasks completed")
+            return True
+        except Exception as e:
+            logger.error(f"Error waiting for AI completion: {e}")
+            return False
+
+    def get_final_captures(self) -> List[Tuple[PhotoboothImage, PhotoboothImage, PhotoboothImage]]:
+        """Get captures with AI-processed versions, fallback to original AI if processing failed"""
+        final_captures = []
+        for i, (gb_image, gb_ai_image, nikon_image) in enumerate(self.captures):
+            # Use new AI result if available, otherwise fall back to original AI version
+            final_ai_image = self.ai_results.get(i, gb_ai_image)
+            final_captures.append((gb_image, final_ai_image, nikon_image))
+
+        return final_captures
 
     def is_complete(self) -> bool:
         return len(self.captures) >= self.max_photos
@@ -118,7 +165,6 @@ class PhotoSet:
         """Save metadata about this photo set"""
         # Implementation for saving session info
         pass
-
 
 class CameraManager:
     """Manages camera operations in a thread-safe manner"""
@@ -242,8 +288,15 @@ class CameraManager:
         return self._initialized
 
 
+@dataclass
+class AIProcessingCompleteEvent:
+    """Event fired when all AI processing is complete"""
+    photo_set: PhotoSet
+
+
+
 class Photobooth:
-    def __init__(self, local_config: Optional[PhotoboothConfig] = None):
+    def __init__(self, local_config: Optional[PhotoboothConfig] = None, replicate_api_token: str = ""):
         self.config = local_config or PhotoboothConfig()
         self.system_status = SystemStatus()
 
@@ -264,10 +317,13 @@ class Photobooth:
             overlay_font
         )
 
+        # AI processing
+        self.ai_processor = AIProcessor(replicate_api_token) if replicate_api_token else None
+
         # Threading
         self.running = False
         self.state_lock = threading.Lock()
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)  # Increased for AI tasks
 
         # Timing
         self.countdown_end_time = 0
@@ -353,6 +409,9 @@ class Photobooth:
                 self.state = PhotoboothState.COUNTDOWN
                 self._start_countdown_timer()
 
+            elif isinstance(event, AIProcessingCompleteEvent):
+                self._handle_ai_processing_complete(event.photo_set)
+
             elif isinstance(event, PrintEvent):
                 self._handle_print_event(event)
 
@@ -407,7 +466,16 @@ class Photobooth:
             gb_regular, gb_bordered, nikon_cropped = result
             _, gb_ai_bordered = self._create_ai_upscaled_version(gb_regular)
 
+            # Add capture to set
+            capture_index = len(self.current_photo_set.captures)
             self.current_photo_set.add_capture(gb_bordered, gb_ai_bordered, nikon_cropped)
+
+            # Start AI processing in background if available
+            if self.ai_processor:
+                self.current_photo_set.start_ai_processing(
+                    self.executor, self.ai_processor, gb_regular, capture_index
+                )
+
             logger.info(
                 f"Captured photo {self.current_photo_set.current_capture}/{self.config.photos_per_session}")
 
@@ -415,17 +483,52 @@ class Photobooth:
                 self.hardware.blink_button_led(0, 0.2)
 
             if self.current_photo_set.is_complete():
-                self._start_printing()
+                # Wait for AI processing before printing
+                if self.ai_processor:
+                    self._wait_for_ai_processing()
+                else:
+                    self._start_printing()
             else:
                 # Start a timer for the delay between photos
                 threading.Timer(self.config.delay_between_photos,
                                 lambda: self.event_queue.put(NextPhotoEvent())).start()
 
+    def _wait_for_ai_processing(self):
+        """Wait for AI processing to complete in a separate thread"""
+
+        def wait_for_ai():
+            try:
+                # Run the async wait in a new event loop
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                success = loop.run_until_complete(self.current_photo_set.wait_for_ai_completion())
+                loop.close()
+
+                if success:
+                    self.event_queue.put(AIProcessingCompleteEvent(self.current_photo_set))
+                else:
+                    # Proceed with printing even if AI failed
+                    self.event_queue.put(AIProcessingCompleteEvent(self.current_photo_set))
+            except Exception as e:
+                logger.error(f"Error waiting for AI processing: {e}")
+                self.event_queue.put(AIProcessingCompleteEvent(self.current_photo_set))
+
+        self.state = PhotoboothState.PROCESSING  # Show "processing" during AI wait
+        threading.Thread(target=wait_for_ai, daemon=True).start()
+
+    def _handle_ai_processing_complete(self, photo_set: PhotoSet):
+        """Handle completion of AI processing"""
+        logger.info("AI processing complete, starting print process")
+        if photo_set == self.current_photo_set:
+            self._start_printing()
+
     def _start_printing(self):
         """Start the printing process"""
         self.state = PhotoboothState.PRINTING
         if self.current_photo_set:
-            self.event_queue.put(PrintEvent(self.current_photo_set.captures))
+            # Get final captures with AI results
+            final_captures = self.current_photo_set.get_final_captures()
+            self.event_queue.put(PrintEvent(final_captures))
             self.current_photo_set = None
             self.state = PhotoboothState.IDLE
 
@@ -546,7 +649,7 @@ def layout_page(frames: List[Tuple[PhotoboothImage, PhotoboothImage, PhotoboothI
     available_height = page_height - margin_y_top - margin_y_bottom
     
     # Column layout
-    column_spacing = 50  # Space between columns
+    column_spacing = margin_x * 2
     max_column_width = (available_width - column_spacing) // 2
     
     # Calculate image dimensions based on both constraints
@@ -647,6 +750,90 @@ def test_layout():
     pages[0].save("captures/test.pdf", "PDF", resolution=100.0, save_all=True, append_images=pages[1:])
 
 
+def sample_capture(use_replicate_ai: bool = False, replicate_api_token: str = ""):
+    file1 = "captures/gameboy/unframed/gb1.png"
+    file2 = "captures/gameboy/unframed/gb2.png"
+    file3 = "captures/gameboy/unframed/gb3.png"
+    file4 = "captures/gameboy/unframed/gb1.png"  # repeat number 1 for testing
+
+    cm = CameraManager(PhotoboothConfig())
+    nikon1 = cm._crop_to_gb_aspect_ratio(PhotoboothImage.from_file("captures/nikon/nikon1.jpg"))
+    nikon2 = cm._crop_to_gb_aspect_ratio(PhotoboothImage.from_file("captures/nikon/nikon2.jpg"))
+    nikon3 = cm._crop_to_gb_aspect_ratio(PhotoboothImage.from_file("captures/nikon/nikon3.jpg"))
+    nikon4 = cm._crop_to_gb_aspect_ratio(PhotoboothImage.from_file("captures/nikon/nikon1.jpg"))
+
+    nikon_frames = [nikon1, nikon2, nikon3, nikon4]
+
+    # Create AI processor if requested
+    ai_processor = AIProcessor(replicate_api_token) if use_replicate_ai and replicate_api_token else None
+
+    # Create a GB camera instance to use the add_border method
+    gb_camera = GBCamera(config=GBCameraConfig())
+    
+    frames = []
+    for i, file_path in enumerate([file1, file2, file3, file4], 1):
+        try:
+            # Load image as numpy array
+            frame = cv2.imread(file_path, cv2.IMREAD_COLOR)
+            if frame is None:
+                logger.error(f"Could not load file: {file_path}")
+                continue
+                
+            # Add border using gbcamera method
+            bordered_frame = gb_camera.add_border(frame)
+            
+            # Create PhotoboothImage metadata
+            timestamp = time.time()
+            original_metadata = ImageMetadata(
+                timestamp=timestamp,
+                camera_type="gameboy",
+                session_id="sample_session",
+                image_index=i,
+                processing_applied=[]
+            )
+            
+            bordered_metadata = ImageMetadata(
+                timestamp=timestamp,
+                camera_type="gameboy_bordered",
+                session_id="sample_session",
+                image_index=i,
+                processing_applied=["border"]
+            )
+            
+            # Create PhotoboothImage objects and save them to get file paths
+            original_image = PhotoboothImage(data=frame, metadata=original_metadata)
+            original_filepath = f"captures/sample_gameboy_{i}.png"
+            original_image.save(original_filepath)
+            
+            bordered_image = PhotoboothImage(data=bordered_frame, metadata=bordered_metadata)
+            bordered_filepath = f"captures/sample_gameboy_bordered_{i}.png"
+            bordered_image.save(bordered_filepath)
+
+            # Choose AI processing method
+            if ai_processor:
+                logger.info(f"Using Replicate API for AI processing (image {i})")
+                ai_image_bordered = ai_processor.process_image_sync(original_image)
+            else:
+                logger.info(f"Using fallback AI processing (image {i})")
+                ai_image, ai_image_bordered = Photobooth._create_ai_upscaled_version(original_image)
+            
+            ai_filepath = f"captures/sample_gameboy_ai_{i}.png"
+            ai_image_bordered.save(ai_filepath)
+            
+            frames.append((bordered_image, ai_image_bordered, nikon_frames[i-1]))
+            
+        except Exception as e:
+            logger.error(f"Error processing {file_path}: {e}")
+    
+    if len(frames) == 4:
+        # Generate layout
+        pages = layout_page(frames)
+        pages[0].save("captures/sample_capture_test.pdf", "PDF", resolution=100.0, save_all=True, append_images=pages[1:])
+        logger.info("Sample capture PDF generated")
+    else:
+        logger.error(f"Expected 4 frames, got {len(frames)}")
+
+
 if __name__ == "__main__":
     # Example with custom configuration
     config = PhotoboothConfig(
@@ -662,7 +849,8 @@ if __name__ == "__main__":
             image_format="JPEG"
         )
     )
-
-    #photobooth = Photobooth(config)
+    replicate_ai_token = secret.REPLICATE_API_TOKEN
+    #photobooth = Photobooth(config, replicate_ai_token)
     #photobooth.run()
-    test_layout()
+    #test_layout()
+    sample_capture(True, replicate_ai_token)
