@@ -643,7 +643,7 @@ def layout_page(frames: List[Tuple[PhotoboothImage, PhotoboothImage, PhotoboothI
     # Simple margin control
     margin_x = 50  # Side margins
     margin_y_top = 50  # Top margin
-    margin_y_bottom = 350  # Bottom margin (for text space)
+    margin_y_bottom = 300  # Bottom margin (for text space)
     
     # Image aspect ratio (GB camera: 160/144)
     image_aspect_ratio = 160.0 / 144.0  # 1.111...
@@ -664,6 +664,13 @@ def layout_page(frames: List[Tuple[PhotoboothImage, PhotoboothImage, PhotoboothI
     # Find the most restrictive constraint
     max_image_width_from_x = max_column_width
     max_image_height_from_x = int(max_image_width_from_x / image_aspect_ratio)
+
+    try:
+        bottom_text_file = "striptext.png"
+        bottom_text = Image.open(bottom_text_file)
+    except Exception as e:
+        logger.error(f"Error opening bottom text image: {e}")
+        return []
     
     # Use the most restrictive dimension
     if max_image_height_from_x <= max_image_height_from_y:
@@ -722,6 +729,8 @@ def layout_page(frames: List[Tuple[PhotoboothImage, PhotoboothImage, PhotoboothI
                     page.paste(img, (x, int(y)))
                 except Exception as e:
                     logger.error(f"Error placing image {image}: {e}")
+
+            page.paste(bottom_text, (x, int(y + image_height + min_spacing_between_images + 20)))
                     
     return pages
 
@@ -854,7 +863,7 @@ if __name__ == "__main__":
         )
     )
     replicate_ai_token = secret.REPLICATE_API_TOKEN
-    photobooth = Photobooth(config, replicate_ai_token)
-    photobooth.run()
-    #test_layout()
+    #photobooth = Photobooth(config, replicate_ai_token)
+    #hotobooth.run()
+    test_layout()
     #sample_capture(True, replicate_ai_token)
