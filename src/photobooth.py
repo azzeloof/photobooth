@@ -25,7 +25,8 @@ from aiprocessor import AIProcessor
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-overlay_font = ImageFont.truetype("fonts/Jersey_10/Jersey10-Regular.ttf", 128)
+header_font = ImageFont.truetype("fonts/Jersey_10/Jersey10-Regular.ttf", 72)
+center_font = ImageFont.truetype("fonts/Jersey_10/Jersey10-Regular.ttf", 128)
 
 @dataclass
 class PhotoboothConfig:
@@ -314,7 +315,8 @@ class Photobooth:
             self.config.window_name,
             self.config.fullscreen,
             self.config.display_scale,
-            overlay_font
+            header_font,
+            center_font
         )
 
         # AI processing
@@ -530,7 +532,7 @@ class Photobooth:
             final_captures = self.current_photo_set.get_final_captures()
             self.event_queue.put(PrintEvent(final_captures))
             self.current_photo_set = None
-            self.state = PhotoboothState.IDLE
+            #self.state = PhotoboothState.IDLE
 
     @staticmethod
     def _create_ai_upscaled_version(photo: PhotoboothImage):
@@ -583,8 +585,10 @@ class Photobooth:
             # Save as multi-page PDF
             pages[0].save(filename, "PDF", resolution=100.0, save_all=True, append_images=pages[1:])
             self.printer.print(filename)
+            self.state = PhotoboothState.IDLE
         except Exception as e:
             logger.error(f"Printing failed: {e}")
+            self.state = PhotoboothState.IDLE
 
     def _render_display(self):
         """Delegates all rendering tasks to the DisplayManager."""
@@ -850,7 +854,7 @@ if __name__ == "__main__":
         )
     )
     replicate_ai_token = secret.REPLICATE_API_TOKEN
-    #photobooth = Photobooth(config, replicate_ai_token)
-    #photobooth.run()
+    photobooth = Photobooth(config, replicate_ai_token)
+    photobooth.run()
     #test_layout()
-    sample_capture(True, replicate_ai_token)
+    #sample_capture(True, replicate_ai_token)
